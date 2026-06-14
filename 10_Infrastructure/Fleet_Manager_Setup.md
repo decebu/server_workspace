@@ -514,6 +514,121 @@ Alle Kestra-Flows und Schedules sind sofort aktiv, da die `database.mv.db` volls
 
 ---
 
+## Secret-Rotation
+
+Beide für Kestra relevanten Secrets liegen base64-kodiert in `.env_encoded`
+(`SECRET_NTFY_TOKEN`, `SECRET_ANSIBLE_PRIVATE_KEY`) und werden per `env_file` eingelesen.
+Eine Rotation besteht immer aus: neues Geheimnis erzeugen → an der Quelle hinterlegen →
+`.env_encoded` aktualisieren → Kestra neu starten → verifizieren → committen.
+
+> Hinweis: Beim base64-Kodieren `printf '%s'` (kein `echo`) verwenden, damit kein
+> Trailing-Newline mitkodiert wird. Der ntfy-Task entfernt es zwar zusätzlich per `| trim`,
+> beim Ansible-Key wäre ein angehängtes Newline aber unkritisch bis störend — sauber ist
+> ohne.
+
+### ntfy-Token rotieren
+
+Unkritisch und schnell — der Token hat nur Publish-Recht auf das Topic `fleet_backups`.
+
+```bash
+# 1. VPS: Schreibrecht sicherstellen + neuen Token erzeugen
+docker exec ntfy ntfy access kuma-bot fleet_backups rw
+docker exec ntfy ntfy token add kuma-bot
+#    -> "token tk_... created for user kuma-bot"
+
+# 2. Fleet Manager: neuen Token base64-kodieren
+printf '%s' 'tk_NEUER_TOKEN' | base64
+
+# 3. In .env_encoded den Wert von SECRET_NTFY_TOKEN ersetzen
+#    SECRET_NTFY_TOKEN=<base64-ergebnis>
+
+# 4. Kestra neu starten
+cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d kestra
+
+# 5. Verifizieren (über den WireGuard-Pfad, den Kestra nutzt) -> erwartet 200
+docker exec fleet-wg-client sh -c \
+  'curl -s -o /dev/null -w "%{http_code}\n" \
+   -H "Authorization: Bearer tk_NEUER_TOKEN" <NTFY_PUBLIC_ENDPOINT>/v1/account'
+
+# 6. Alten Token serverseitig entwerten (Liste ansehen, dann gezielt löschen)
+docker exec ntfy ntfy token list kuma-bot
+docker exec ntfy ntfy token remove kuma-bot tk_ALTER_TOKEN
+
+# 7. .env_encoded committen (git-crypt verschlüsselt automatisch)
+git -C /home/decebu/docker-stacks add stacks/fleet-manager/.env_encoded
+git -C /home/decebu/docker-stacks commit -m "chore(fleet): ntfy-Token rotiert"
+```
+
+### Ansible-SSH-Key rotieren
+
+Sicherheitskritisch: Der Key gibt SSH-Zugriff als User `kestra` (mit `become`/root via
+Playbooks) auf **alle** Fleet-Hosts inkl. VPS. Vorgehen mit Überlappung — neuer Public Key
+wird verteilt, **bevor** der alte entfernt wird, damit man sich nicht aussperrt.
+
+```bash
+# 1. Neues ed25519-Keypair erzeugen (z.B. lokal in einem temp-Verzeichnis)
+ssh-keygen -t ed25519 -f ./fleet_ansible_key -C "kestra-fleet" -N ""
+#    erzeugt fleet_ansible_key (privat) + fleet_ansible_key.pub (öffentlich)
+```
+
+**2. Neuen Public Key auf allen Fleet-Hosts ausrollen** — solange der alte Key noch gültig
+ist. Am einfachsten per Ansible-Ad-hoc mit dem *alten* Key (auf einem Host mit Ansible,
+Inventory `inventory_fleet.ini`):
+
+```bash
+ansible fleet -i inventory_fleet.ini \
+  --user kestra --private-key ./alter_ansible_key --become \
+  -m ansible.posix.authorized_key \
+  -a "user=kestra state=present key='$(cat ./fleet_ansible_key.pub)'"
+```
+
+```bash
+# 3. Privaten Key base64-kodieren (einzeilig, ohne Umbrüche)
+base64 -w0 ./fleet_ansible_key
+
+# 4. In .env_encoded den Wert von SECRET_ANSIBLE_PRIVATE_KEY ersetzen
+#    SECRET_ANSIBLE_PRIVATE_KEY=<base64-ergebnis>
+
+# 5. Kestra neu starten
+cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d kestra
+```
+
+**6. Verifizieren:** Den Flow `hello_fleet` in der Kestra-UI manuell ausführen
+(`ansible -m ping`). Alle Hosts müssen mit dem neuen Key erreichbar sein (`pong`).
+
+```bash
+# 7. Erst NACH erfolgreichem Test: alten Public Key auf allen Hosts entfernen
+ansible fleet -i inventory_fleet.ini \
+  --user kestra --private-key ./fleet_ansible_key --become \
+  -m ansible.posix.authorized_key \
+  -a "user=kestra state=absent key='$(cat ./alter_ansible_key.pub)'"
+
+# 8. .env_encoded committen
+git -C /home/decebu/docker-stacks add stacks/fleet-manager/.env_encoded
+git -C /home/decebu/docker-stacks commit -m "chore(fleet): Ansible-SSH-Key rotiert"
+
+# 9. Lokale Klartext-Kopien des privaten Keys sicher löschen
+shred -u ./fleet_ansible_key ./alter_ansible_key 2>/dev/null; rm -f ./fleet_ansible_key.pub ./alter_ansible_key.pub
+```
+
+> Falls der alte Key nicht mehr verfügbar ist, muss der neue Public Key alternativ per
+> Konsolen-/Out-of-Band-Zugriff in `~kestra/.ssh/authorized_keys` jedes Hosts eingetragen
+> werden.
+
+### Wann rotieren?
+
+- **ntfy-Token:** bei `401`-Fehlern (siehe Troubleshooting) oder Verdacht auf Leak.
+- **Ansible-Key:** bei Verdacht auf Kompromittierung, ausgeschiedenem Zugriff, oder wenn
+  der Key (z.B. über Logs, Tool-Kontext, Screenshares) außerhalb von `.env_encoded`
+  sichtbar war.
+
+> Härtungshinweis: Frühere Flow-Revisionen enthielten einen `debug_secret`-Task, der den
+> ntfy-Token per `echo` in die Execution-Logs geschrieben hat. Solche Debug-Tasks vor
+> produktiver Nutzung entfernen — gerenderte Secrets bleiben sonst in der `database.mv.db`
+> erhalten. Eine Rotation entwertet den geloggten alten Token.
+
+---
+
 ## Troubleshooting
 
 ### ntfy 401 Unauthorized (Benachrichtigung schlägt fehl)
