@@ -4,10 +4,11 @@
 
 Der Fleet Manager ist ein Raspberry Pi in Heimnetz 2 (192.168.71.10), der folgende Aufgaben übernimmt:
 
-- **Zentrales Backup-Aggregat**: Zieht Restic-Repositories von allen Fleet-Clients per Ansible/rsync
-- **Fleet-Automatisierung**: Führt OS-Updates, Backup-Runs und Backup-Pulls auf allen Fleet-Hosts via Kestra + Ansible aus
+- **Fleet-Automatisierung**: Führt OS-Updates, Restic-Backup-Runs und Backup-Pulls auf allen Fleet-Hosts via Kestra + Ansible aus
+- **Zentrales Backup-Aggregat**: Zieht die Restic-Repositories aller Fleet-Clients per rsync auf den Manager
+- **Benachrichtigung**: Meldet den Status der Flows per ntfy-Push
 - **Backup-Bereitstellung**: Stellt die aggregierten Backups per rsync-Daemon für das QNAP bereit
-- **VPN-Client**: Ist per WireGuard ins VPN eingebunden, um alle Heimnetze zu erreichen
+- **VPN-Client**: Ist per WireGuard ins VPN eingebunden, um alle Fleet-Hosts (10.10.30.x) zu erreichen
 
 ---
 
@@ -24,22 +25,33 @@ Der Fleet Manager ist ein Raspberry Pi in Heimnetz 2 (192.168.71.10), der folgen
                     │  └──────┬───────┘                       │
                     │         │ network_mode: service         │
                     │  ┌──────▼───────┐                       │
-                    │  │ fleet-kestra │  Ansible Playbooks    │
-                    │  │ (Kestra)     │──────────────────────►│── VPN → Fleet-Hosts
+                    │  │ fleet-kestra │  startet Ansible-     │
+                    │  │ (Kestra)     │  Container via Docker  │
+                    │  └──────┬───────┘                       │
+                    │         │ networkMode: container:        │
+                    │         │ fleet-wg-client                │
+                    │  ┌──────▼───────┐                       │
+                    │  │ cytopia/     │──────────────────────►│── VPN (10.10.30.x) → Fleet-Hosts
+                    │  │ ansible      │  ansible-playbook      │
                     │  └──────────────┘                       │
                     │  ┌──────────────┐                       │
-                    │  │ fleet-rsync- │                       │
-                    │  │ server       │◄── QNAP pull backup   │
+                    │  │ fleet-rsync- │◄── QNAP pull backup   │
+                    │  │ server       │                       │
                     │  └──────────────┘                       │
                     └─────────────────────────────────────────┘
 ```
+
+Der zentrale Trick: Sowohl der Kestra-Container als auch die von Kestra **dynamisch
+gestarteten Ansible-Container** hängen sich in den Netzwerk-Namespace des
+WireGuard-Containers. Dadurch erreichen die Ansible-Playbooks die Fleet-Hosts über das
+VPN (10.10.30.x), ohne dass Kestra ein eigenes Netzwerk-Interface besitzt.
 
 ### Netzwerk-Details
 
 | Komponente         | IP / Port         | Beschreibung                              |
 |--------------------|-------------------|-------------------------------------------|
 | Fleet Manager RPI  | 192.168.71.10     | Host-IP im Heimnetz 2                     |
-| WireGuard VPN-IP   | 10.10.20.x        | VPN-Peer (Heimnetz 2 Gateway)             |
+| WireGuard VPN-Range| 10.10.30.x        | Fleet-Hosts (Peers) über VPN              |
 | DNS im Container   | 192.168.70.3      | Interner DNS-Resolver (AdGuard/Unbound)   |
 | Kestra Web-UI      | :8080             | Geteilt über WireGuard-Container-Netzwerk |
 | rsync-Daemon       | :873              | Read-only Bereitstellung für QNAP         |
@@ -65,18 +77,23 @@ Kestra hat **kein eigenes Netzwerk-Interface** — es nutzt `network_mode: "serv
 │   │   └── server.conf         # WireGuard Server-Template
 │   └── wg_confs/
 │       └── wg0.conf            # Aktive WireGuard-Konfiguration (mit Keys!)
-└── kestra/                     # Kestra-Datenbankverzeichnis (Bind-Mount, 97MB)
+└── kestra/                     # Kestra-Datenbankverzeichnis (Bind-Mount)
     ├── database.mv.db          # H2-Datenbank (Flows, Executions, Schedules)
     ├── dev/                    # Kestra-Namespace "dev"
     │   └── fleet_management/
-    │       └── _files/         # Ansible Playbooks & Inventories
+    │       └── _files/         # Ansible Playbooks & Inventories (Namespace-Files)
+    │           ├── fleet_restic_backup.yaml
+    │           ├── fleet_pull_backup.yaml
+    │           ├── fleet_upgrade.yaml
+    │           ├── inventory_fleet.ini
+    │           └── inventory_homelab.ini
     ├── company/
     └── tutorial/
 
-/var/backup/                    # Backup-Aggregat (908MB+)
+/var/backup/                    # Backup-Aggregat
 └── fleet_backups/
-    └── <hostname>/             # Restic-Repo je Fleet-Client
-        └── snapshots/
+    └── <hostname>/             # Restic-Repo je Fleet-Client (gepullt)
+        └── ...
 ```
 
 ---
@@ -118,6 +135,11 @@ env_file:
 
 `kestra:latest-full` enthält bereits alle benötigten Plugins inklusive Ansible. Kestra startet im `server local`-Modus (kein Kubernetes). Die `database.mv.db` in `./kestra` enthält alle Flows, Schedules und Execution-History.
 
+Kestra führt die Ansible-Playbooks nicht selbst aus, sondern startet pro Task über den
+gemounteten Docker-Socket einen **Ansible-Container** (`cytopia/ansible:latest-tools`) mit
+`networkMode: "container:fleet-wg-client"`, damit dieser über das VPN auf die Fleet-Hosts
+zugreifen kann.
+
 **Wichtig:** `group_add: 984` ist die Docker-GID auf dem Host — muss nach Neuinstallation geprüft werden:
 ```bash
 getent group docker | cut -d: -f3
@@ -147,10 +169,19 @@ Git-crypt-verschlüsselt im Repo. Enthält folgende Variablen für Kestra:
 
 | Variable                  | Beschreibung                                   |
 |---------------------------|------------------------------------------------|
-| `SECRET_ANSIBLE_PRIVATE_KEY` | Base64-kodierter SSH-Private-Key für Ansible |
-| `SECRET_NTFY_TOKEN`          | API-Token für ntfy-Benachrichtigungen        |
+| `SECRET_ANSIBLE_PRIVATE_KEY` | Base64-kodierter SSH-Private-Key für Ansible (User `kestra` auf den Fleet-Hosts) |
+| `SECRET_NTFY_TOKEN`          | ntfy-Access-Token für Benachrichtigungen     |
 
-Diese werden in Kestra als `{{ secret('ANSIBLE_PRIVATE_KEY') }}` bzw. `{{ secret('NTFY_TOKEN') }}` referenziert.
+Referenzierung in Kestra als `{{ secret('ANSIBLE_PRIVATE_KEY') }}` bzw. `{{ secret('NTFY_TOKEN') }}`.
+
+**Wichtig zur Kodierung:** Kestra erwartet `SECRET_*`-Variablen **base64-kodiert** und
+dekodiert sie beim Zugriff über `secret(...)`. Der Wert in `.env_encoded` ist also der
+base64-kodierte Token, nicht der Klartext-Token. Beispiel zum Erzeugen:
+
+```bash
+printf '%s' 'tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx' | base64
+# Ergebnis als Wert von SECRET_NTFY_TOKEN eintragen
+```
 
 ### rsyncd.secrets
 
@@ -172,46 +203,176 @@ Enthält den WireGuard Private Key und Preshared Key. Diese Datei wird von linux
 
 ## Kestra Flows
 
-Alle Flows liegen im Namespace `dev.fleet_management`. Die Ansible Playbooks sind als Kestra-Files (`_files`) hinterlegt und werden direkt im Kestra-Container ausgeführt.
+Alle Flows liegen im Namespace `dev.fleet_management`. Die Ansible-Playbooks und Inventories
+sind als Kestra-Namespace-Files (`_files/`) hinterlegt und werden in den Flows per
+`{{ read('<datei>') }}` in den Ansible-Container geladen.
 
-### fleet_upgrade
+> Hinweis: Die Doku benennt die Flows nach ihrer **Kestra-Flow-ID** (nicht nach dem
+> Playbook-Dateinamen). Das jeweils ausgeführte Playbook ist je Flow angegeben.
 
-**Zweck:** OS-Sicherheitsupdates auf allen Fleet-Hosts
-**Schedule:** Konfiguriert in Kestra
-**Playbook:** `fleet_upgrade.yaml`
+### Ablauf-Kette (Schedule + Flow-Trigger)
 
-- Führt `apt dist-upgrade` auf allen Hosts in `inventory_fleet.ini` durch
-- Prüft ob Reboot nötig ist
-- Meldet Status pro Host zurück an Kestra
+```
+täglich 02:00  ─► restic_backup_fleet ─(bei Abschluss)─► pull_backups_to_manager
+                        │                                        │
+                        └──────────────┬─────────────────────────┘
+                                       ▼ (bei Abschluss, jeweils)
+sonntags 03:00 ─► update_fleet_devices ─► fleet_backup_notification ─► ntfy-Push
+sonntags 03:00 ─► update_lan_devices
+```
 
-### fleet_restic_backup
+### restic_backup_fleet
 
-**Zweck:** Restic-Backup auf jedem Fleet-Host lokal ausführen
-**Playbook:** `fleet_restic_backup.yaml`
+- **Trigger:** Schedule `cron: "0 2 * * *"` (täglich 02:00)
+- **Playbook:** `fleet_restic_backup.yaml` (Inventory: `inventory_fleet.ini`, `--user kestra`)
+- **Task:** `run_ansible_backup` (`io.kestra.plugin.ansible.cli.AnsibleCLI`)
 
-- Installiert Restic falls nicht vorhanden
-- Initialisiert Restic-Repo unter `/var/backup/restic-repo` falls nicht vorhanden
-- Passwort-Datei muss auf jedem Host unter `/root/.restic_pw` liegen
-- Sonderpfad VPS: Erstellt zusätzlich Postgres-Dump (Firezone-DB)
-- Retention: 7 daily, 4 weekly
-- Meldet Status für ntfy-Benachrichtigung
+Führt das Restic-Backup **lokal auf jedem Fleet-Host** aus:
+- Installiert Restic, falls nicht vorhanden
+- Prüft Passwort-Datei `/root/.restic_pw` (Playbook bricht ab, falls sie fehlt)
+- Initialisiert das Repo unter `/var/backup/restic-repo`, falls nicht vorhanden
+- Sonderfall VPS (`is_vps=true`): erstellt zusätzlich einen Postgres-Dump
+  (`pg_dumpall` der Firezone-DB) und leitet ihn per `--stdin` in Restic
+- Sichert die je Host definierten `backup_paths`
+- `restic check` (Integritätsprüfung)
+- Retention: `--keep-daily 7 --keep-weekly 4 --prune`
 
-### fleet_pull_backup
+### pull_backups_to_manager
 
-**Zweck:** Restic-Repos von Fleet-Hosts zum Fleet Manager ziehen
-**Playbook:** `fleet_pull_backup.yaml`
+- **Trigger:** Flow-Trigger `after_backup_completion` — startet nach Abschluss von
+  `restic_backup_fleet`
+- **Playbook:** `fleet_pull_backup.yaml`
+- **Task:** `run_pull_playbook` (`AnsibleCLI`)
 
-- Zieht per `ansible.posix.synchronize` (rsync) die Repos von jedem Host
+Zieht die Restic-Repos von jedem Fleet-Host auf den Manager:
 - Quelle auf Fleet-Host: `/var/backup/restic-repo/`
 - Ziel auf Fleet Manager: `/var/backup/fleet_backups/<hostname>/`
-- `delegate_to: localhost` — rsync läuft im Kestra-Container, nicht auf dem Zielhost
+- per `ansible.posix.synchronize` (rsync, `mode: pull`, `--archive --delete`)
+- Das Zielverzeichnis wird `delegate_to: localhost` angelegt — der rsync-Pull läuft also
+  im Ansible-Container (= Fleet Manager), nicht auf dem Zielhost
+
+### update_fleet_devices
+
+- **Trigger:** Schedule `cron: "0 3 * * 0"` (sonntags 03:00)
+- **Playbook:** `fleet_upgrade.yaml`
+- **Task:** `run_ansible_updates` (`AnsibleCLI`)
+- **Beschreibung:** „Führt apt upgrade auf der gesamten Flotte durch"
+
+Führt `apt update` + `upgrade: dist` + `autoremove` + `autoclean` auf allen Fleet-Hosts
+aus und prüft per `/var/run/reboot-required`, ob ein Reboot nötig ist.
+
+### update_lan_devices
+
+- **Trigger:** Schedule `cron: "0 3 * * 0"` (sonntags 03:00)
+- **Task:** `run_lan_update` (`AnsibleCLI`)
+
+Update-Lauf für die LAN-Geräte (separat von der eigentlichen Fleet).
+
+### fleet_backup_notification
+
+- **Trigger:** Drei Flow-Trigger, jeweils mit Bedingung
+  `ExecutionStatus in [SUCCESS, FAILED, WARNING]`:
+  - `on_backup_completion` → nach `restic_backup_fleet`
+  - `on_update_completion` → nach `update_fleet_devices`
+  - `on_backup_pull_completion` → nach `pull_backups_to_manager`
+- **Task:** `ntfy_send` (`io.kestra.plugin.core.http.Request`, `POST`)
+
+Zentraler Benachrichtigungs-Flow. Reagiert auf den Abschluss der drei o.g. Flows und
+schickt eine ntfy-Push an das Topic `fleet_backups`. Titel und Tags werden dynamisch nach
+Status/Quell-Flow gesetzt, der Body enthält Flow-ID, Status, Execution-ID und einen
+Deep-Link in die Kestra-UI. Siehe Abschnitt **ntfy-Integration**.
+
+> Diese Trennung (Backup-Flows ohne eigene ntfy-Logik, eine zentrale Notification)
+> ersetzt die früheren Inline-ntfy-Tasks in den einzelnen Backup-Flows.
+
+### hello_fleet
+
+- **Trigger:** keiner (manuell)
+- **Task:** `check_remote_rpi` (`AnsibleCLI`, `ansible -m ping`)
+
+Diagnose-Flow zum Prüfen der SSH/VPN-Erreichbarkeit der Fleet-Hosts.
 
 ### Inventories
 
-Zwei verschlüsselte Inventory-Dateien (git-crypt):
+Zwei git-crypt-verschlüsselte Inventory-Dateien:
 
-- `inventory_fleet.ini` — Die zu verwaltenden Fleet-Clients
-- `inventory_homelab.ini` — Alle Homelab-Hosts
+- `inventory_fleet.ini` — die zu verwaltenden Fleet-Clients
+- `inventory_homelab.ini` — alle Homelab-Hosts
+
+Aufbau `inventory_fleet.ini` (Gruppe `[fleet]`, alle über VPN 10.10.30.x):
+
+| Host         | Rolle                                  | Host-Variablen                                  |
+|--------------|----------------------------------------|-------------------------------------------------|
+| 10.10.30.1   | VPS (Firezone, WireGuard, UFW)         | `is_vps=true`, `ansible_port=54322`, `pg_container=firezone-postgres` |
+| 10.10.30.20  | Client + Home Assistant                | `is_ha_client=true`                             |
+| 10.10.30.21  | Client                                 | —                                               |
+| 10.10.30.23  | Client                                 | —                                               |
+
+Pro Host steuert `backup_paths` die zu sichernden Pfade (z.B.
+`/home/decebu/docker-stacks /etc/wireguard`), beim HA-Client zusätzlich das
+Home-Assistant-Verzeichnis.
+
+---
+
+## ntfy-Integration
+
+Die Benachrichtigungen laufen über einen **ntfy-Server, der nicht auf dem Fleet Manager,
+sondern im `vps-monitoring`-Stack auf dem VPS** betrieben wird.
+
+### ntfy-Server (VPS)
+
+- Image `binwiederhier/ntfy`, erreichbar unter `<NTFY_PUBLIC_ENDPOINT>`
+- `--auth-default-access=deny-all` + `--enable-login=true` → **jeder Zugriff erfordert
+  Authentifizierung**
+- Auth-DB: `/etc/ntfy/user.db` (Bind-Mount)
+- Topic für die Fleet-Benachrichtigungen: `fleet_backups`
+- Service-User für Kestra: `kuma-bot`
+
+### Anbindung von Kestra
+
+Der Flow `fleet_backup_notification` sendet per HTTP-POST an
+`<NTFY_PUBLIC_ENDPOINT>/fleet_backups` mit Bearer-Auth:
+
+```yaml
+tasks:
+  - id: ntfy_send
+    type: io.kestra.plugin.core.http.Request
+    uri: "<NTFY_PUBLIC_ENDPOINT>/fleet_backups"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ secret('NTFY_TOKEN') | trim }}"
+      Title: "Fleet {{ trigger.flowId == 'restic_backup_fleet' ? 'Backup' : 'Update' }}: {{ trigger.state }}"
+      Tags:  "{{ trigger.state == 'SUCCESS' ? 'green_circle' : 'red_circle' }},{{ trigger.flowId == 'restic_backup_fleet' ? 'floppy_disk' : 'arrow_up' }}"
+    body: |
+      Fleet-Management Bericht ({{ now() | date("HH:mm") }}):
+      Der Flow '{{ trigger.flowId }}' wurde abgeschlossen.
+      Status: {{ trigger.state }}
+      Execution-ID: {{ trigger.executionId }}
+      Logs: <KESTRA_PUBLIC_ENDPOINT>/ui/executions/{{ trigger.namespace }}/{{ trigger.flowId }}/{{ trigger.executionId }}
+    contentType: text/plain
+```
+
+Das `| trim` entfernt ein evtl. an den Token angehängtes Newline (entsteht beim
+base64-Kodieren mit `echo`).
+
+### Token verwalten (auf dem VPS)
+
+```bash
+# Schreibrecht des Users auf das Topic prüfen/setzen
+docker exec ntfy ntfy access kuma-bot fleet_backups rw
+
+# Neuen Access-Token erzeugen
+docker exec ntfy ntfy token add kuma-bot
+# -> "token tk_... created for user kuma-bot"
+
+# Benutzer / bestehende Rechte ansehen
+docker exec ntfy ntfy user list
+docker exec ntfy ntfy access kuma-bot
+```
+
+Der erzeugte Token muss anschließend **base64-kodiert** als `SECRET_NTFY_TOKEN` in
+`.env_encoded` auf dem Fleet Manager hinterlegt und Kestra neu gestartet werden
+(siehe Abschnitt **Secrets** und **Troubleshooting → ntfy 401**).
 
 ---
 
@@ -298,6 +459,18 @@ docker exec fleet-wg-client wg show
 
 Sollte den Peer und den letzten Handshake anzeigen. Falls die WireGuard-Config fehlt oder der Peer neu registriert werden muss, siehe `VPN_Firezone_installation.md`.
 
+### 8. ntfy-Anbindung prüfen
+
+Auf dem Fleet Manager (Pfad, den Kestra nutzt — über den WireGuard-Container):
+
+```bash
+docker exec fleet-wg-client sh -c \
+  'curl -s -o /dev/null -w "%{http_code}\n" \
+   -H "Authorization: Bearer <TOKEN>" \
+   <NTFY_PUBLIC_ENDPOINT>/v1/account'
+# Erwartet: 200
+```
+
 ---
 
 ## Restore aus Backup (dd-Image)
@@ -343,6 +516,50 @@ Alle Kestra-Flows und Schedules sind sofort aktiv, da die `database.mv.db` volls
 
 ## Troubleshooting
 
+### ntfy 401 Unauthorized (Benachrichtigung schlägt fehl)
+
+Symptom in den Kestra-Logs des Tasks `ntfy_send`:
+
+```
+{"code":40101,"http":401,"error":"unauthorized"}
+```
+
+Ursache ist fast immer ein **serverseitig nicht mehr gültiger Token** (regeneriert, oder
+`user.db` zurückgesetzt), während das Kestra-Secret noch den alten Token enthält.
+
+**Diagnose** (read-only, ohne eine Push zu senden) am ntfy-Endpoint `/v1/account`:
+
+```bash
+# anonym -> 200 (Server erreichbar), mit ungültigem/altem Token -> 401
+curl -s -o /dev/null -w "%{http_code}\n" <NTFY_PUBLIC_ENDPOINT>/v1/account
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer <TOKEN>" <NTFY_PUBLIC_ENDPOINT>/v1/account
+```
+
+- anonym `200` + Token `200` → Token gültig (Problem liegt woanders, z.B. Topic-Recht → dann
+  `403` beim Publish, nicht `401`)
+- anonym `200` + Token `401` → **Token ungültig** → neuen Token erzeugen
+
+**Fix:**
+
+```bash
+# 1. Auf dem VPS: neuen Token erzeugen (Schreibrecht sicherstellen)
+docker exec ntfy ntfy access kuma-bot fleet_backups rw
+docker exec ntfy ntfy token add kuma-bot
+
+# 2. Auf dem Fleet Manager: Token base64-kodieren und in .env_encoded eintragen
+printf '%s' 'tk_NEUER_TOKEN' | base64
+#   -> als Wert von SECRET_NTFY_TOKEN setzen
+
+# 3. Kestra neu starten (liest .env_encoded neu ein)
+cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d kestra
+
+# 4. Verifizieren (über den WireGuard-Pfad, den Kestra nutzt): erwartet 200
+docker exec fleet-wg-client sh -c \
+  'curl -s -o /dev/null -w "%{http_code}\n" \
+   -H "Authorization: Bearer tk_NEUER_TOKEN" <NTFY_PUBLIC_ENDPOINT>/v1/account'
+```
+
 ### Kestra kann nicht in /var/backup schreiben
 
 ```bash
@@ -376,4 +593,12 @@ docker compose up -d --force-recreate kestra
 ls -la /home/decebu/docker-stacks/stacks/fleet-manager/rsyncd.secrets
 # Daemon-Log:
 docker logs fleet-rsync-server
+```
+
+### Fleet-Host nicht erreichbar (Ansible)
+
+```bash
+# hello_fleet-Flow in der Kestra-UI manuell ausführen (ansible ping)
+# oder VPN-Handshake prüfen:
+docker exec fleet-wg-client wg show
 ```
