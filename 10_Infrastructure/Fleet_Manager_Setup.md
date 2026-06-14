@@ -572,8 +572,17 @@ ssh-keygen -t ed25519 -f ./fleet_ansible_key -C "kestra-fleet" -N ""
 ```
 
 **2. Neuen Public Key auf allen Fleet-Hosts ausrollen** — solange der alte Key noch gültig
-ist. Am einfachsten per Ansible-Ad-hoc mit dem *alten* Key (auf einem Host mit Ansible,
-Inventory `inventory_fleet.ini`):
+ist. **Empfohlen:** den Kestra-Flow `rotate_ansible_pubkey` nutzen (siehe unten). Er
+authentifiziert sich mit dem aktuellen Key (`{{ secret('ANSIBLE_PRIVATE_KEY') }}`) und legt
+den neuen Public Key auf allen Hosts an:
+
+- Kestra-UI → `dev.fleet_management` → `rotate_ansible_pubkey` → **Execute**
+- Input `new_public_key` = Inhalt von `fleet_ansible_key.pub` (eine Zeile)
+- Lauf muss grün sein. Ein nicht erreichbarer Host lässt den Lauf fehlschlagen → Rollout
+  unvollständig, also **nicht** mit Schritt 3 fortfahren, sondern Host fixen und erneut
+  ausführen (idempotent).
+
+Alternativ per Ansible-Ad-hoc mit dem *alten* Key (auf einem Host mit Ansible):
 
 ```bash
 ansible fleet -i inventory_fleet.ini \
@@ -614,6 +623,61 @@ shred -u ./fleet_ansible_key ./alter_ansible_key 2>/dev/null; rm -f ./fleet_ansi
 > Falls der alte Key nicht mehr verfügbar ist, muss der neue Public Key alternativ per
 > Konsolen-/Out-of-Band-Zugriff in `~kestra/.ssh/authorized_keys` jedes Hosts eingetragen
 > werden.
+
+#### Kestra-Flow `rotate_ansible_pubkey`
+
+Übernimmt Schritt 2 (Public-Key-Rollout). Manuell ausgelöst (keine Trigger), Namespace
+`dev.fleet_management`, ein Input `new_public_key`. Self-contained — das Playbook ist inline,
+es wird nur das vorhandene Namespace-File `inventory_fleet.ini` gelesen. Der Flow **addiert
+nur** (`state=present`) und entfernt nie einen Key; der private Key wird nie berührt.
+
+```yaml
+id: rotate_ansible_pubkey
+namespace: dev.fleet_management
+description: |
+  Rollt einen neuen Ansible-Public-Key auf alle Fleet-Hosts aus, authentifiziert mit dem
+  AKTUELLEN Key. ADDIERT nur (state=present). Nach Erfolg den privaten Key manuell
+  base64-kodiert als SECRET_ANSIBLE_PRIVATE_KEY in .env_encoded eintragen + Kestra neu starten.
+
+inputs:
+  - id: new_public_key
+    type: STRING
+    description: "Inhalt der neuen .pub-Datei (eine Zeile, z.B. 'ssh-ed25519 AAAA... kestra-fleet')"
+
+tasks:
+  - id: rollout_pubkey
+    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: cytopia/ansible:latest-tools
+      networkMode: "container:fleet-wg-client"
+    env:
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    inputFiles:
+      inventory.ini: "{{ read('inventory_fleet.ini') }}"
+      ansible_key: "{{ secret('ANSIBLE_PRIVATE_KEY') }}"
+      new_key.pub: "{{ inputs.new_public_key }}"
+      rollout.yml: |
+        - name: Roll out new Ansible public key to fleet
+          hosts: fleet
+          become: true
+          gather_facts: false
+          tasks:
+            - name: Ensure new public key present for user kestra
+              ansible.posix.authorized_key:
+                user: kestra
+                state: present
+                key: "{{ lookup('file', 'new_key.pub') }}"
+            - name: Report
+              ansible.builtin.debug:
+                msg: "OK: neuer Public Key auf {{ inventory_hostname }} hinterlegt."
+    commands:
+      - chmod 600 ansible_key
+      - >-
+        ansible-playbook -i inventory.ini rollout.yml
+        --user kestra --private-key ansible_key
+        -e "ansible_python_interpreter=/usr/bin/python3"
+```
 
 ### Wann rotieren?
 
