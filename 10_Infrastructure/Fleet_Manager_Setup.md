@@ -605,13 +605,19 @@ cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d kestr
 **6. Verifizieren:** Den Flow `hello_fleet` in der Kestra-UI manuell ausführen
 (`ansible -m ping`). Alle Hosts müssen mit dem neuen Key erreichbar sein (`pong`).
 
+**7. Erst NACH erfolgreichem Test:** den alten Public Key auf allen Hosts entfernen.
+**Empfohlen:** Kestra-Flow `remove_ansible_pubkey` (siehe unten), Input `old_public_key` =
+Inhalt von `alter_ansible_key.pub`. Der Flow authentifiziert sich dann bereits mit dem neuen
+Key und hat einen Schutz gegen Selbst-Aussperrung. Alternativ per Ad-hoc:
+
 ```bash
-# 7. Erst NACH erfolgreichem Test: alten Public Key auf allen Hosts entfernen
 ansible fleet -i inventory_fleet.ini \
   --user kestra --private-key ./fleet_ansible_key --become \
   -m ansible.posix.authorized_key \
   -a "user=kestra state=absent key='$(cat ./alter_ansible_key.pub)'"
+```
 
+```bash
 # 8. .env_encoded committen
 git -C /home/decebu/docker-stacks add stacks/fleet-manager/.env_encoded
 git -C /home/decebu/docker-stacks commit -m "chore(fleet): Ansible-SSH-Key rotiert"
@@ -675,6 +681,68 @@ tasks:
       - chmod 600 ansible_key
       - >-
         ansible-playbook -i inventory.ini rollout.yml
+        --user kestra --private-key ansible_key
+        -e "ansible_python_interpreter=/usr/bin/python3"
+```
+
+#### Kestra-Flow `remove_ansible_pubkey`
+
+Gegenstück zu `rotate_ansible_pubkey`: entfernt einen alten Public Key (`state=absent`).
+Erst **nach** erfolgreichem Key-Wechsel ausführen (neuer Key aktiv). Eingebauter
+**Selbst-Aussperr-Schutz**: leitet aus dem aktiven Private Key per `ssh-keygen -y` den
+zugehörigen Public Key ab und bricht ab, falls `old_public_key` diesem entspricht.
+
+```yaml
+id: remove_ansible_pubkey
+namespace: dev.fleet_management
+description: |
+  Entfernt einen alten Ansible-Public-Key von allen Fleet-Hosts (state=absent), authentifiziert
+  mit dem AKTUELLEN Key. Schutz gegen Selbst-Aussperrung: bricht ab, wenn der zu entfernende Key
+  dem aktiv abgeleiteten Key entspricht. Erst NACH erfolgreichem Key-Wechsel ausfuehren.
+
+inputs:
+  - id: old_public_key
+    type: STRING
+    description: "Inhalt der ALTEN .pub-Datei (eine Zeile), die entfernt werden soll"
+
+tasks:
+  - id: remove_pubkey
+    type: io.kestra.plugin.ansible.cli.AnsibleCLI
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      image: cytopia/ansible:latest-tools
+      networkMode: "container:fleet-wg-client"
+    env:
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    inputFiles:
+      inventory.ini: "{{ read('inventory_fleet.ini') }}"
+      ansible_key: "{{ secret('ANSIBLE_PRIVATE_KEY') }}"
+      old_key.pub: "{{ inputs.old_public_key }}"
+      remove.yml: |
+        - name: Remove old Ansible public key from fleet
+          hosts: fleet
+          become: true
+          gather_facts: false
+          tasks:
+            - name: Ensure old public key absent for user kestra
+              ansible.posix.authorized_key:
+                user: kestra
+                state: absent
+                key: "{{ lookup('file', 'old_key.pub') }}"
+            - name: Report
+              ansible.builtin.debug:
+                msg: "OK: alter Public Key auf {{ inventory_hostname }} entfernt (falls vorhanden)."
+    commands:
+      - chmod 600 ansible_key
+      # Selbst-Aussperr-Schutz: zu entfernender Key darf nicht der aktive Key sein
+      - >-
+        CUR=$(ssh-keygen -y -f ansible_key | awk '{print $1" "$2}');
+        OLD=$(awk '{print $1" "$2}' old_key.pub);
+        if [ "$CUR" = "$OLD" ]; then
+        echo "ABBRUCH: old_public_key entspricht dem AKTUELL AKTIVEN Key - das wuerde dich aussperren.";
+        exit 1; fi
+      - >-
+        ansible-playbook -i inventory.ini remove.yml
         --user kestra --private-key ansible_key
         -e "ansible_python_interpreter=/usr/bin/python3"
 ```
