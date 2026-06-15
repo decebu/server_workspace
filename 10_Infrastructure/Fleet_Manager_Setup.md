@@ -633,9 +633,36 @@ shred -u ./fleet_ansible_key ./alter_ansible_key 2>/dev/null; rm -f ./fleet_ansi
 #### Kestra-Flow `rotate_ansible_pubkey`
 
 Übernimmt Schritt 2 (Public-Key-Rollout). Manuell ausgelöst (keine Trigger), Namespace
-`dev.fleet_management`, ein Input `new_public_key`. Self-contained — das Playbook ist inline,
-es wird nur das vorhandene Namespace-File `inventory_fleet.ini` gelesen. Der Flow **addiert
-nur** (`state=present`) und entfernt nie einen Key; der private Key wird nie berührt.
+`dev.fleet_management`, ein Input `new_public_key`. Der Flow **addiert nur**
+(`state=present`) und entfernt nie einen Key; der private Key wird nie berührt.
+
+> **Wichtig (Pebble-Fallstrick):** Das Playbook darf **nicht inline** im Flow stehen.
+> Kestra rendert `inputFiles`-Inhalte mit seiner Template-Engine (Pebble) und stolpert über
+> Ansible-Ausdrücke wie `{{ lookup(...) }}` / `{{ inventory_hostname }}`
+> (`Function or Macro [lookup] does not exist`). Kestras Pebble kennt auch **kein**
+> `{% raw %}`. Lösung: das Playbook als **Namespace-File** ablegen und per
+> `{{ read('...') }}` laden — `read()`-Inhalt wird nicht erneut gerendert. Die anderen
+> `inputFiles` (`read()`, `secret()`, `inputs`) sollen ja gerendert werden und bleiben so.
+
+Playbook-Datei `_files/fleet_rotate_pubkey.yaml` (Namespace-File neben den übrigen Playbooks):
+
+```yaml
+- name: Roll out new Ansible public key to fleet
+  hosts: fleet
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Ensure new public key present for user kestra
+      ansible.posix.authorized_key:
+        user: kestra
+        state: present
+        key: "{{ lookup('file', 'new_key.pub') }}"
+    - name: Report
+      ansible.builtin.debug:
+        msg: "OK: neuer Public Key auf {{ inventory_hostname }} hinterlegt."
+```
+
+Flow `rotate_ansible_pubkey`:
 
 ```yaml
 id: rotate_ansible_pubkey
@@ -663,20 +690,7 @@ tasks:
       inventory.ini: "{{ read('inventory_fleet.ini') }}"
       ansible_key: "{{ secret('ANSIBLE_PRIVATE_KEY') }}"
       new_key.pub: "{{ inputs.new_public_key }}"
-      rollout.yml: |
-        - name: Roll out new Ansible public key to fleet
-          hosts: fleet
-          become: true
-          gather_facts: false
-          tasks:
-            - name: Ensure new public key present for user kestra
-              ansible.posix.authorized_key:
-                user: kestra
-                state: present
-                key: "{{ lookup('file', 'new_key.pub') }}"
-            - name: Report
-              ansible.builtin.debug:
-                msg: "OK: neuer Public Key auf {{ inventory_hostname }} hinterlegt."
+      rollout.yml: "{{ read('fleet_rotate_pubkey.yaml') }}"
     commands:
       - chmod 600 ansible_key
       - >-
@@ -690,7 +704,28 @@ tasks:
 Gegenstück zu `rotate_ansible_pubkey`: entfernt einen alten Public Key (`state=absent`).
 Erst **nach** erfolgreichem Key-Wechsel ausführen (neuer Key aktiv). Eingebauter
 **Selbst-Aussperr-Schutz**: leitet aus dem aktiven Private Key per `ssh-keygen -y` den
-zugehörigen Public Key ab und bricht ab, falls `old_public_key` diesem entspricht.
+zugehörigen Public Key ab und bricht ab, falls `old_public_key` diesem entspricht. Playbook
+ebenfalls als Namespace-File (gleicher Pebble-Grund wie oben).
+
+Playbook-Datei `_files/fleet_remove_pubkey.yaml`:
+
+```yaml
+- name: Remove old Ansible public key from fleet
+  hosts: fleet
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Ensure old public key absent for user kestra
+      ansible.posix.authorized_key:
+        user: kestra
+        state: absent
+        key: "{{ lookup('file', 'old_key.pub') }}"
+    - name: Report
+      ansible.builtin.debug:
+        msg: "OK: alter Public Key auf {{ inventory_hostname }} entfernt (falls vorhanden)."
+```
+
+Flow `remove_ansible_pubkey`:
 
 ```yaml
 id: remove_ansible_pubkey
@@ -718,20 +753,7 @@ tasks:
       inventory.ini: "{{ read('inventory_fleet.ini') }}"
       ansible_key: "{{ secret('ANSIBLE_PRIVATE_KEY') }}"
       old_key.pub: "{{ inputs.old_public_key }}"
-      remove.yml: |
-        - name: Remove old Ansible public key from fleet
-          hosts: fleet
-          become: true
-          gather_facts: false
-          tasks:
-            - name: Ensure old public key absent for user kestra
-              ansible.posix.authorized_key:
-                user: kestra
-                state: absent
-                key: "{{ lookup('file', 'old_key.pub') }}"
-            - name: Report
-              ansible.builtin.debug:
-                msg: "OK: alter Public Key auf {{ inventory_hostname }} entfernt (falls vorhanden)."
+      remove.yml: "{{ read('fleet_remove_pubkey.yaml') }}"
     commands:
       - chmod 600 ansible_key
       # Selbst-Aussperr-Schutz: zu entfernender Key darf nicht der aktive Key sein
