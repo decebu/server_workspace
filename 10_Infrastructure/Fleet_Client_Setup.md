@@ -58,8 +58,9 @@ sudo useradd -m -s /bin/bash kestra
 # SSH-Verzeichnis vorbereiten
 sudo install -d -m 700 -o kestra -g kestra /home/kestra/.ssh
 
-# Ansible-Public-Key hinterlegen (entspricht SECRET_ANSIBLE_PRIVATE_KEY auf dem Manager)
-echo 'ssh-ed25519 AAAA... kestra-fleet' | sudo tee -a /home/kestra/.ssh/authorized_keys
+# Ansible-Public-Key hinterlegen — mit from=-Restriktion (Key nur von der Manager-VPN-IP nutzbar).
+# Der zugehoerige private Key liegt age-verschluesselt auf dem Manager (~/.config/fleet/kestra.env.age).
+echo 'from="10.10.30.10" ssh-ed25519 AAAA... kestra-fleet' | sudo tee -a /home/kestra/.ssh/authorized_keys
 sudo chmod 600 /home/kestra/.ssh/authorized_keys
 sudo chown -R kestra:kestra /home/kestra/.ssh
 

@@ -66,9 +66,8 @@ Kestra hat **kein eigenes Netzwerk-Interface** — es nutzt `network_mode: "serv
 /home/decebu/docker-stacks/stacks/fleet-manager/
 ├── docker-compose.yml          # Stack-Definition
 ├── application.yaml            # Kestra-Konfiguration (Docker-Plugin)
-├── .env_encoded                # Secrets (git-crypt verschlüsselt im Repo)
 ├── rsyncd.conf                 # rsync-Daemon-Konfiguration
-├── rsyncd.secrets              # rsync-Passwörter (nicht im Repo)
+├── rsyncd.secrets              # rsync-Passwörter (Host-only, gitignored, 600)
 ├── wg-client/                  # WireGuard-Client-Config (Bind-Mount)
 │   ├── coredns/
 │   │   └── Corefile            # CoreDNS-Config
@@ -129,9 +128,15 @@ volumes:
 group_add:
   - 984   # docker-Gruppe auf dem Host
 network_mode: "service:wireguard"
-env_file:
-  - .env_encoded
+environment:
+  - SECRET_ANSIBLE_PRIVATE_KEY=${SECRET_ANSIBLE_PRIVATE_KEY:?bitte via fleet-up starten}
+  - SECRET_NTFY_TOKEN=${SECRET_NTFY_TOKEN:?bitte via fleet-up starten}
 ```
+
+Die Secrets stehen **nicht** als Datei im Repo, sondern werden zur Laufzeit per `fleet-up`
+aus einer age-verschlüsselten Datei in die Shell-Env injiziert (siehe **Secrets & Konfiguration**).
+Der `:?`-Guard lässt ein versehentliches `docker compose up` (ohne geladene Env) bewusst
+fehlschlagen, statt Kestra mit leeren Secrets zu starten.
 
 `kestra:latest-full` enthält bereits alle benötigten Plugins inklusive Ansible. Kestra startet im `server local`-Modus (kein Kubernetes). Die `database.mv.db` in `./kestra` enthält alle Flows, Schedules und Execution-History.
 
@@ -163,35 +168,44 @@ Stellt `/var/backup` read-only als rsync-Modul `fleet_backups` bereit. Authentif
 
 ## Secrets & Konfiguration
 
-### .env_encoded
+### Kestra-Secrets (age-verschlüsselt, Runtime-Injektion)
 
-Git-crypt-verschlüsselt im Repo. Enthält folgende Variablen für Kestra:
+Die Kestra-Secrets liegen **nicht** mehr im Repo (früher `.env_encoded`, git-crypt — entfernt).
+Stattdessen:
 
-| Variable                  | Beschreibung                                   |
-|---------------------------|------------------------------------------------|
-| `SECRET_ANSIBLE_PRIVATE_KEY` | Base64-kodierter SSH-Private-Key für Ansible (User `kestra` auf den Fleet-Hosts) |
-| `SECRET_NTFY_TOKEN`          | ntfy-Access-Token für Benachrichtigungen     |
+| Artefakt | Ort | Inhalt |
+|---|---|---|
+| age-Identity (passphrase-geschützt) | `~/.config/age/keys.txt.age` | Root-of-Trust, Host-only, in keinem git |
+| age-verschlüsselte Env | `~/.config/fleet/kestra.env.age` | `SECRET_ANSIBLE_PRIVATE_KEY`, `SECRET_NTFY_TOKEN` (base64), Host-only |
 
-Referenzierung in Kestra als `{{ secret('ANSIBLE_PRIVATE_KEY') }}` bzw. `{{ secret('NTFY_TOKEN') }}`.
+Variablen werden in Kestra als `{{ secret('ANSIBLE_PRIVATE_KEY') }}` bzw.
+`{{ secret('NTFY_TOKEN') }}` referenziert (Kestra base64-**dekodiert** `SECRET_*`).
 
-**Wichtig zur Kodierung:** Kestra erwartet `SECRET_*`-Variablen **base64-kodiert** und
-dekodiert sie beim Zugriff über `secret(...)`. Der Wert in `.env_encoded` ist also der
-base64-kodierte Token, nicht der Klartext-Token. Beispiel zum Erzeugen:
+**Ablauf:**
+- `fleet-genkey` (chezmoi, `~/.local/bin`) erzeugt ein neues Ansible-Keypair und schreibt die
+  age-Env (privater Key nie im Klartext; gibt nur den Public Key aus).
+- `fleet-up` (chezmoi) entschlüsselt die Identity (Passphrase-Prompt) und damit die Env zur
+  Laufzeit und startet den Stack — **keine** Klartext-Env-Datei at rest.
+- Reboots brauchen kein `fleet-up`: Docker behält die Env des erstellten Containers
+  (`restart: unless-stopped`); `fleet-up` nur bei (Re)Create nötig.
 
-```bash
-printf '%s' 'tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx' | base64
-# Ergebnis als Wert von SECRET_NTFY_TOKEN eintragen
-```
+**Ehrliche Grenze:** Während Kestra läuft, ist das Secret per `docker inspect` /
+`docker exec … printenv` für jeden mit Docker-Zugriff lesbar — das ist inhärent bei
+Env-Secrets und wird durch diesen Aufbau nicht verhindert. Der Schutz liegt in: nicht in git,
+nicht als Klartext-Datei at rest, und Blast-Radius-Begrenzung (`from=`-Restriktion, s.u.).
 
 ### rsyncd.secrets
 
-Nicht im Repo, muss manuell erstellt werden:
+Host-only (gitignored, `chmod 600`). Format:
 
 ```
 qnap_fleet:<PASSWORD>
 ```
 
-Dateirechte zwingend: `chmod 600 rsyncd.secrets`
+> Hinweis: Diese Datei lag früher **im Klartext in der git-Historie** (kein git-crypt, da
+> `.secrets` nicht von `.gitattributes` erfasst). Sie wurde aus dem Tracking entfernt,
+> gitignored und das Passwort rotiert (auch im QNAP-rsync-Job). Der alte Blob bleibt in der
+> git-Historie, bis optional per `git filter-repo` gepurged.
 
 ### wg-client/wg_confs/wg0.conf
 
@@ -370,8 +384,8 @@ docker exec ntfy ntfy user list
 docker exec ntfy ntfy access kuma-bot
 ```
 
-Der erzeugte Token muss anschließend **base64-kodiert** als `SECRET_NTFY_TOKEN` in
-`.env_encoded` auf dem Fleet Manager hinterlegt und Kestra neu gestartet werden
+Der erzeugte Token muss anschließend **base64-kodiert** als `SECRET_NTFY_TOKEN` in die
+age-Env (`~/.config/fleet/kestra.env.age`) auf dem Fleet Manager und Kestra via `fleet-up` neu gestartet werden
 (siehe Abschnitt **Secrets** und **Troubleshooting → ntfy 401**).
 
 ---
@@ -417,7 +431,7 @@ Host fleet-mgr
 ssh fleet-mgr
 git clone <REPO_URL> /home/decebu/docker-stacks
 cd /home/decebu/docker-stacks
-git-crypt unlock  # .env_encoded und Inventories entschlüsseln
+git-crypt unlock  # Inventories (inventory_*.ini) entschlüsseln
 ```
 
 ### 3. /var/backup anlegen
@@ -442,11 +456,18 @@ getent group docker | cut -d: -f3
 
 In `docker-compose.yml` unter `kestra.group_add` die GID eintragen (aktuell `984`).
 
-### 6. Stack starten
+### 6. Secrets bereitstellen & Stack starten
+
+Die Kestra-Secrets liegen **nicht** im Repo. Auf einem frischen Host vor dem Start:
+- `sudo apt install age`
+- age-Identity `~/.config/age/keys.txt.age` aus Backup wiederherstellen — oder neu erzeugen:
+  `age-keygen | age -p -o ~/.config/age/keys.txt.age` (`chmod 600`)
+- age-Env `~/.config/fleet/kestra.env.age` aus Backup wiederherstellen — oder neu via
+  `fleet-genkey` erzeugen (erzeugt einen neuen Ansible-Key → danach Pubkey mit
+  `rotate_ansible_pubkey` ausrollen)
 
 ```bash
-cd /home/decebu/docker-stacks/stacks/fleet-manager
-docker compose up -d
+fleet-up        # entschlüsselt die Secrets (Passphrase) und startet den Stack
 ```
 
 Kestra Web-UI: http://192.168.71.10:8080
@@ -490,10 +511,16 @@ sudo mount /dev/sdX2 /mnt/rpi
 ### Dateien übertragen
 
 ```bash
-# fleet-manager Stack-Verzeichnis (inkl. Kestra-Datenbank, WireGuard-Keys, Secrets):
+# fleet-manager Stack-Verzeichnis (inkl. Kestra-Datenbank, WireGuard-Keys):
 rsync -aAXv --progress \
   /mnt/rpi/home/decebu/docker-stacks/stacks/fleet-manager/ \
   fleet-mgr:/home/decebu/docker-stacks/stacks/fleet-manager/
+
+# age-Identity + age-Env (Kestra-Secrets, liegen NICHT im Stack-Verzeichnis):
+rsync -aAXv --progress \
+  /mnt/rpi/home/decebu/.config/age/ fleet-mgr:/home/decebu/.config/age/
+rsync -aAXv --progress \
+  /mnt/rpi/home/decebu/.config/fleet/ fleet-mgr:/home/decebu/.config/fleet/
 
 # /var/backup (Backup-Daten, braucht sudo auf Ziel):
 rsync -aAXv --progress \
@@ -506,8 +533,11 @@ rsync -aAXv --progress \
 
 ### Danach Stack starten
 
+`fleet-up` braucht die age-Passphrase, daher interaktiv (kein ssh-Einzeiler):
+
 ```bash
-ssh fleet-mgr "cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d"
+ssh fleet-mgr
+fleet-up        # Passphrase eingeben -> Stack startet
 ```
 
 Alle Kestra-Flows und Schedules sind sofort aktiv, da die `database.mv.db` vollständig wiederhergestellt wurde.
@@ -516,15 +546,10 @@ Alle Kestra-Flows und Schedules sind sofort aktiv, da die `database.mv.db` volls
 
 ## Secret-Rotation
 
-Beide für Kestra relevanten Secrets liegen base64-kodiert in `.env_encoded`
-(`SECRET_NTFY_TOKEN`, `SECRET_ANSIBLE_PRIVATE_KEY`) und werden per `env_file` eingelesen.
-Eine Rotation besteht immer aus: neues Geheimnis erzeugen → an der Quelle hinterlegen →
-`.env_encoded` aktualisieren → Kestra neu starten → verifizieren → committen.
-
-> Hinweis: Beim base64-Kodieren `printf '%s'` (kein `echo`) verwenden, damit kein
-> Trailing-Newline mitkodiert wird. Der ntfy-Task entfernt es zwar zusätzlich per `| trim`,
-> beim Ansible-Key wäre ein angehängtes Newline aber unkritisch bis störend — sauber ist
-> ohne.
+Die Kestra-Secrets liegen age-verschlüsselt in `~/.config/fleet/kestra.env.age` (nicht in git,
+kein Klartext at rest) und werden zur Laufzeit per `fleet-up` injiziert. Rotation heißt daher:
+Geheimnis erzeugen → in die age-Env schreiben (verschlüsselt an den Recipient) → `fleet-up`
+(recreate) → verifizieren. Nur `fleet-up` braucht die Passphrase.
 
 ### ntfy-Token rotieren
 
@@ -533,98 +558,57 @@ Unkritisch und schnell — der Token hat nur Publish-Recht auf das Topic `fleet_
 ```bash
 # 1. VPS: Schreibrecht sicherstellen + neuen Token erzeugen
 docker exec ntfy ntfy access kuma-bot fleet_backups rw
-docker exec ntfy ntfy token add kuma-bot
-#    -> "token tk_... created for user kuma-bot"
+docker exec ntfy ntfy token add kuma-bot      # -> tk_NEU
 
-# 2. Fleet Manager: neuen Token base64-kodieren
-printf '%s' 'tk_NEUER_TOKEN' | base64
+# 2. age-Env: nur die NTFY-Zeile ersetzen (entschlüsseln -> sed -> neu verschlüsseln,
+#    kein Klartext-File; Passphrase nötig). <RECIPIENT> = age1… Public Recipient.
+ID=~/.config/age/keys.txt.age; ENV=~/.config/fleet/kestra.env.age
+age -d -i "$ID" "$ENV" \
+  | sed "s|^SECRET_NTFY_TOKEN=.*|SECRET_NTFY_TOKEN=$(printf '%s' 'tk_NEU' | base64)|" \
+  | age -r <RECIPIENT> -o "$ENV.new" && mv "$ENV.new" "$ENV" && chmod 600 "$ENV"
 
-# 3. In .env_encoded den Wert von SECRET_NTFY_TOKEN ersetzen
-#    SECRET_NTFY_TOKEN=<base64-ergebnis>
+# 3. Kestra mit neuem Token neu erstellen
+fleet-up
 
-# 4. Kestra neu starten
-cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d kestra
-
-# 5. Verifizieren (über den WireGuard-Pfad, den Kestra nutzt) -> erwartet 200
+# 4. Verifizieren (über den WireGuard-Pfad) -> erwartet 200
 docker exec fleet-wg-client sh -c \
   'curl -s -o /dev/null -w "%{http_code}\n" \
-   -H "Authorization: Bearer tk_NEUER_TOKEN" <NTFY_PUBLIC_ENDPOINT>/v1/account'
+   -H "Authorization: Bearer tk_NEU" <NTFY_PUBLIC_ENDPOINT>/v1/account'
 
-# 6. Alten Token serverseitig entwerten (Liste ansehen, dann gezielt löschen)
+# 5. Alten Token serverseitig entwerten
 docker exec ntfy ntfy token list kuma-bot
-docker exec ntfy ntfy token remove kuma-bot tk_ALTER_TOKEN
-
-# 7. .env_encoded committen (git-crypt verschlüsselt automatisch)
-git -C /home/decebu/docker-stacks add stacks/fleet-manager/.env_encoded
-git -C /home/decebu/docker-stacks commit -m "chore(fleet): ntfy-Token rotiert"
+docker exec ntfy ntfy token remove kuma-bot tk_ALT
 ```
 
 ### Ansible-SSH-Key rotieren
 
-Sicherheitskritisch: Der Key gibt SSH-Zugriff als User `kestra` (mit `become`/root via
-Playbooks) auf **alle** Fleet-Hosts inkl. VPS. Vorgehen mit Überlappung — neuer Public Key
-wird verteilt, **bevor** der alte entfernt wird, damit man sich nicht aussperrt.
+Sicherheitskritisch (root auf allen Hosts via `become`). Vorgehen mit Überlappung — neuer
+Public Key wird verteilt, **bevor** der alte entfernt wird. Mit `fleet-genkey`/`fleet-up`
+ist kein `.env_encoded`-Editieren und kein manuelles base64 mehr nötig.
 
 ```bash
-# 1. Neues ed25519-Keypair erzeugen (z.B. lokal in einem temp-Verzeichnis)
-ssh-keygen -t ed25519 -f ./fleet_ansible_key -C "kestra-fleet" -N ""
-#    erzeugt fleet_ansible_key (privat) + fleet_ansible_key.pub (öffentlich)
+# 1. Neues Keypair erzeugen + age-Env schreiben (übernimmt bestehende Secrets wie ntfy aus
+#    der age-Env, Passphrase nötig). Gibt NUR den neuen Public Key aus, Privatteil nie im Klartext.
+fleet-genkey
 ```
 
-**2. Neuen Public Key auf allen Fleet-Hosts ausrollen** — solange der alte Key noch gültig
-ist. **Empfohlen:** den Kestra-Flow `rotate_ansible_pubkey` nutzen (siehe unten). Er
-authentifiziert sich mit dem aktuellen Key (`{{ secret('ANSIBLE_PRIVATE_KEY') }}`) und legt
-den neuen Public Key auf allen Hosts an:
-
-- Kestra-UI → `dev.fleet_management` → `rotate_ansible_pubkey` → **Execute**
-- Input `new_public_key` = Inhalt von `fleet_ansible_key.pub` (eine Zeile)
-- Lauf muss grün sein. Ein nicht erreichbarer Host lässt den Lauf fehlschlagen → Rollout
-  unvollständig, also **nicht** mit Schritt 3 fortfahren, sondern Host fixen und erneut
-  ausführen (idempotent).
-
-Alternativ per Ansible-Ad-hoc mit dem *alten* Key (auf einem Host mit Ansible):
+**2. Pubkey ausrollen** — Kestra-UI → `dev.fleet_management` → `rotate_ansible_pubkey` →
+**Execute**, Input `new_public_key` = der von `fleet-genkey` ausgegebene Public Key. Rollt mit
+`from="10.10.30.10"` aus. Lauf muss grün sein (ein nicht erreichbarer Host = Rollout
+unvollständig → Host fixen + erneut ausführen, idempotent).
 
 ```bash
-ansible fleet -i inventory_fleet.ini \
-  --user kestra --private-key ./alter_ansible_key --become \
-  -m ansible.posix.authorized_key \
-  -a "user=kestra state=present key='$(cat ./fleet_ansible_key.pub)'"
+# 3. Kestra mit neuem Key neu erstellen (Passphrase)
+fleet-up
 ```
 
-```bash
-# 3. Privaten Key base64-kodieren (einzeilig, ohne Umbrüche)
-base64 -w0 ./fleet_ansible_key
+**4. Verifizieren:** Flow `hello_fleet` → `pong` auf allen Hosts (jetzt mit neuem Key).
 
-# 4. In .env_encoded den Wert von SECRET_ANSIBLE_PRIVATE_KEY ersetzen
-#    SECRET_ANSIBLE_PRIVATE_KEY=<base64-ergebnis>
-
-# 5. Kestra neu starten
-cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d kestra
-```
-
-**6. Verifizieren:** Den Flow `hello_fleet` in der Kestra-UI manuell ausführen
-(`ansible -m ping`). Alle Hosts müssen mit dem neuen Key erreichbar sein (`pong`).
-
-**7. Erst NACH erfolgreichem Test:** den alten Public Key auf allen Hosts entfernen.
-**Empfohlen:** Kestra-Flow `remove_ansible_pubkey` (siehe unten), Input `old_public_key` =
-Inhalt von `alter_ansible_key.pub`. Der Flow authentifiziert sich dann bereits mit dem neuen
-Key und hat einen Schutz gegen Selbst-Aussperrung. Alternativ per Ad-hoc:
-
-```bash
-ansible fleet -i inventory_fleet.ini \
-  --user kestra --private-key ./fleet_ansible_key --become \
-  -m ansible.posix.authorized_key \
-  -a "user=kestra state=absent key='$(cat ./alter_ansible_key.pub)'"
-```
-
-```bash
-# 8. .env_encoded committen
-git -C /home/decebu/docker-stacks add stacks/fleet-manager/.env_encoded
-git -C /home/decebu/docker-stacks commit -m "chore(fleet): Ansible-SSH-Key rotiert"
-
-# 9. Lokale Klartext-Kopien des privaten Keys sicher löschen
-shred -u ./fleet_ansible_key ./alter_ansible_key 2>/dev/null; rm -f ./fleet_ansible_key.pub ./alter_ansible_key.pub
-```
+**5. Erst NACH erfolgreichem Test:** alten Pubkey entfernen — Kestra-UI →
+`remove_ansible_pubkey`, Input `old_public_key` = der **alte** Public Key. Den findest du via
+Flow `diag_authkeys` (zeigt alle authorized_keys je Host): es ist die Zeile **ohne**
+`from="10.10.30.10"`-Präfix. Der Flow hat einen Selbst-Aussperr-Schutz (vergleicht gegen den
+aktiven Key).
 
 > Falls der alte Key nicht mehr verfügbar ist, muss der neue Public Key alternativ per
 > Konsolen-/Out-of-Band-Zugriff in `~kestra/.ssh/authorized_keys` jedes Hosts eingetragen
@@ -657,6 +641,8 @@ Playbook-Datei `_files/fleet_rotate_pubkey.yaml` (Namespace-File neben den übri
         user: kestra
         state: present
         key: "{{ lookup('file', 'new_key.pub') }}"
+        # Blast-Radius: Key nur von der Manager-VPN-IP nutzbar
+        key_options: 'from="10.10.30.10"'
     - name: Report
       ansible.builtin.debug:
         msg: "OK: neuer Public Key auf {{ inventory_hostname }} hinterlegt."
@@ -669,8 +655,8 @@ id: rotate_ansible_pubkey
 namespace: dev.fleet_management
 description: |
   Rollt einen neuen Ansible-Public-Key auf alle Fleet-Hosts aus, authentifiziert mit dem
-  AKTUELLEN Key. ADDIERT nur (state=present). Nach Erfolg den privaten Key manuell
-  base64-kodiert als SECRET_ANSIBLE_PRIVATE_KEY in .env_encoded eintragen + Kestra neu starten.
+  AKTUELLEN Key. ADDIERT nur (state=present). Nach Erfolg neuen Key via fleet-genkey in die
+  age-Env schreiben und Kestra via fleet-up neu erstellen.
 
 inputs:
   - id: new_public_key
@@ -773,7 +759,7 @@ tasks:
 
 - **ntfy-Token:** bei `401`-Fehlern (siehe Troubleshooting) oder Verdacht auf Leak.
 - **Ansible-Key:** bei Verdacht auf Kompromittierung, ausgeschiedenem Zugriff, oder wenn
-  der Key (z.B. über Logs, Tool-Kontext, Screenshares) außerhalb von `.env_encoded`
+  der Key (z.B. über Logs, Tool-Kontext, Screenshares) außerhalb der age-Env
   sichtbar war.
 
 > Härtungshinweis: Frühere Flow-Revisionen enthielten einen `debug_secret`-Task, der den
@@ -816,17 +802,19 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 docker exec ntfy ntfy access kuma-bot fleet_backups rw
 docker exec ntfy ntfy token add kuma-bot
 
-# 2. Auf dem Fleet Manager: Token base64-kodieren und in .env_encoded eintragen
-printf '%s' 'tk_NEUER_TOKEN' | base64
-#   -> als Wert von SECRET_NTFY_TOKEN setzen
+# 2. age-Env: NTFY-Zeile ersetzen (entschlüsseln -> sed -> neu verschlüsseln; Passphrase nötig)
+ID=~/.config/age/keys.txt.age; ENV=~/.config/fleet/kestra.env.age
+age -d -i "$ID" "$ENV" \
+  | sed "s|^SECRET_NTFY_TOKEN=.*|SECRET_NTFY_TOKEN=$(printf '%s' 'tk_NEU' | base64)|" \
+  | age -r <RECIPIENT> -o "$ENV.new" && mv "$ENV.new" "$ENV" && chmod 600 "$ENV"
 
-# 3. Kestra neu starten (liest .env_encoded neu ein)
-cd /home/decebu/docker-stacks/stacks/fleet-manager && docker compose up -d kestra
+# 3. Kestra mit neuem Token neu erstellen
+fleet-up
 
 # 4. Verifizieren (über den WireGuard-Pfad, den Kestra nutzt): erwartet 200
 docker exec fleet-wg-client sh -c \
   'curl -s -o /dev/null -w "%{http_code}\n" \
-   -H "Authorization: Bearer tk_NEUER_TOKEN" <NTFY_PUBLIC_ENDPOINT>/v1/account'
+   -H "Authorization: Bearer tk_NEU" <NTFY_PUBLIC_ENDPOINT>/v1/account'
 ```
 
 ### Kestra kann nicht in /var/backup schreiben
@@ -852,7 +840,7 @@ docker exec fleet-wg-client wg show
 # Aktuelle Docker-GID ermitteln:
 getent group docker | cut -d: -f3
 # In docker-compose.yml unter kestra.group_add anpassen, dann:
-docker compose up -d --force-recreate kestra
+fleet-up kestra --force-recreate
 ```
 
 ### rsync-Verbindung vom QNAP schlägt fehl
