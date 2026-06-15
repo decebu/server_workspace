@@ -458,13 +458,31 @@ In `docker-compose.yml` unter `kestra.group_add` die GID eintragen (aktuell `984
 
 ### 6. Secrets bereitstellen & Stack starten
 
-Die Kestra-Secrets liegen **nicht** im Repo. Auf einem frischen Host vor dem Start:
-- `sudo apt install age`
-- age-Identity `~/.config/age/keys.txt.age` aus Backup wiederherstellen — oder neu erzeugen:
-  `age-keygen | age -p -o ~/.config/age/keys.txt.age` (`chmod 600`)
-- age-Env `~/.config/fleet/kestra.env.age` aus Backup wiederherstellen — oder neu via
-  `fleet-genkey` erzeugen (erzeugt einen neuen Ansible-Key → danach Pubkey mit
-  `rotate_ansible_pubkey` ausrollen)
+Die Kestra-Secrets liegen **nicht** im Repo, sondern age-verschlüsselt unter
+`~/.config/age/keys.txt.age` (Identity = Master-Key) und `~/.config/fleet/kestra.env.age`
+(Secrets, inkl. ntfy-Token). `sudo apt install age` voranstellen.
+
+**Fall A — Recovery (Regelfall: Backup vorhanden):** beide Dateien aus dem Backup
+**zurückkopieren** — **nicht** neu erzeugen (sonst sind alle bestehenden Secrets verloren):
+```bash
+mkdir -p ~/.config/age ~/.config/fleet
+# Quelle: restic-Restore (siehe "Restore aus Backup") ODER chezmoi (falls eingecheckt)
+install -m600 <BACKUP>/keys.txt.age   ~/.config/age/keys.txt.age
+install -m600 <BACKUP>/kestra.env.age ~/.config/fleet/kestra.env.age
+```
+
+**Fall B — nur echter Neuanfang (kein Backup mehr da):** neue Identity + neue Secrets erzeugen.
+Die alten sind dann unwiederbringlich, und der Ansible-Key muss neu ausgerollt werden:
+```bash
+age-keygen | age -p -o ~/.config/age/keys.txt.age && chmod 600 ~/.config/age/keys.txt.age
+fleet-genkey                          # neue age-Env + neuer Ansible-Key (gibt Public Key aus)
+# danach Flow rotate_ansible_pubkey mit dem ausgegebenen Public Key
+```
+
+> Tipp: Wer Recovery vereinfachen will, kann `keys.txt.age` (passphrase-verschlüsselt) und
+> `kestra.env.age` (an den Recipient verschlüsselt) in ein **privates** Repo (z.B. chezmoi)
+> einchecken — Entschlüsselung braucht weiterhin die Passphrase. Sicherheit = Passphrase-Stärke
+> + Repo-Vertraulichkeit; idealerweise Identity und Env nicht im selben Repo bündeln.
 
 ```bash
 fleet-up        # entschlüsselt die Secrets (Passphrase) und startet den Stack
@@ -494,42 +512,46 @@ docker exec fleet-wg-client sh -c \
 
 ---
 
-## Restore aus Backup (dd-Image)
+## Restore aus Backup (restic)
 
-Falls der RPI neu eingerichtet werden muss und ein dd-Image der alten Partition vorliegt:
+Der Fleet Manager sichert sich selbst per `fleet-backup` (restic) nach
+`/var/backup/fleet_backups/fleet-mgr/` — dieses Verzeichnis zieht der QNAP-rsync mit. So
+spielst du den Manager auf einem frischen Host aus diesem restic-Repo zurück.
 
+### Voraussetzungen
 ```bash
-# Image mounten (Offset der Linux-Partition ermitteln):
-sudo fdisk -l /pfad/zum/image.img
-# offset = start_sector * 512
-sudo mount -o loop,offset=<OFFSET> /pfad/zum/image.img /mnt/rpi
-
-# Alternativ: Partition direkt mounten wenn als Block-Device verfügbar
-sudo mount /dev/sdX2 /mnt/rpi
+sudo apt install age restic
 ```
+- **Repo-Passwort** `/root/.restic_pw` = das **extern gesicherte** Passwort (liegt bewusst
+  NICHT im Backup selbst):
+  ```bash
+  sudo sh -c 'umask 077; printf "%s" "<REPO_PW>" > /root/.restic_pw; chmod 600 /root/.restic_pw'
+  ```
+- **Zugriff auf das Repo**: das Verzeichnis `fleet-mgr/` vom QNAP zurückkopieren/mounten,
+  z.B. nach `/var/backup/fleet_backups/fleet-mgr` (oder direkt auf den QNAP-Pfad zeigen).
 
-### Dateien übertragen
-
+### Restore
 ```bash
-# fleet-manager Stack-Verzeichnis (inkl. Kestra-Datenbank, WireGuard-Keys):
-rsync -aAXv --progress \
-  /mnt/rpi/home/decebu/docker-stacks/stacks/fleet-manager/ \
-  fleet-mgr:/home/decebu/docker-stacks/stacks/fleet-manager/
+export RESTIC_REPOSITORY=/var/backup/fleet_backups/fleet-mgr   # oder QNAP-Pfad
+export RESTIC_PASSWORD_FILE=/root/.restic_pw
 
-# age-Identity + age-Env (Kestra-Secrets, liegen NICHT im Stack-Verzeichnis):
-rsync -aAXv --progress \
-  /mnt/rpi/home/decebu/.config/age/ fleet-mgr:/home/decebu/.config/age/
-rsync -aAXv --progress \
-  /mnt/rpi/home/decebu/.config/fleet/ fleet-mgr:/home/decebu/.config/fleet/
-
-# /var/backup (Backup-Daten, braucht sudo auf Ziel):
-rsync -aAXv --progress \
-  --rsync-path="sudo rsync" \
-  /mnt/rpi/var/backup/ \
-  fleet-mgr:/var/backup/
+sudo -E restic snapshots                      # Snapshots ansehen
+sudo -E restic restore latest --target /tmp/restore   # erst in einen Zwischenordner
 ```
-
-`-aAX` erhält Permissions, ACLs und Extended Attributes exakt wie im Original — das löst das Zugriffsrechteproblem für Kestra/Ansible automatisch mit.
+Der Snapshot enthält die Originalpfade:
+`/home/decebu/docker-stacks/stacks/fleet-manager`, `/home/decebu/.config/age`,
+`/home/decebu/.config/fleet`. Aus `/tmp/restore` an die Originalstellen kopieren (Rechte
+erhalten):
+```bash
+sudo rsync -aAX /tmp/restore/home/decebu/docker-stacks/stacks/fleet-manager/ \
+                /home/decebu/docker-stacks/stacks/fleet-manager/
+sudo rsync -aAX /tmp/restore/home/decebu/.config/age/   /home/decebu/.config/age/
+sudo rsync -aAX /tmp/restore/home/decebu/.config/fleet/ /home/decebu/.config/fleet/
+sudo chown -R decebu:decebu ~/.config/age ~/.config/fleet
+```
+> Damit sind age-Identity **und** age-Env (Schritt 6, Fall A) bereits wiederhergestellt —
+> direkt mit `fleet-up` weiter. `--target /` statt `/tmp/restore` würde direkt an die
+> Originalstellen schreiben (nur auf wirklich frischem Host empfehlenswert).
 
 ### Danach Stack starten
 
