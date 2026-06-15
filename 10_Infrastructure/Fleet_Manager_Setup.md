@@ -510,6 +510,60 @@ docker exec fleet-wg-client sh -c \
 # Erwartet: 200
 ```
 
+### 9. Self-Backup wieder einrichten (restic + systemd-Timer)
+
+Das Manager-Self-Backup (siehe Abschnitt **Manager-Self-Backup**) ist host-lokal und muss
+bei einer Neuinstallation **neu aufgesetzt** werden — es kommt nicht über git/chezmoi mit:
+
+```bash
+sudo apt install -y restic
+# Repo-Passwort (extern gesichert!) wiederherstellen:
+sudo sh -c 'umask 077; printf "%s" "<REPO_PW>" > /root/.restic_pw; chmod 600 /root/.restic_pw'
+# ntfy-Token (publish-only) für Backup-Meldungen:
+sudo sh -c 'umask 077; mkdir -p /root/.config; printf "NTFY_TOKEN=%s\n" "<TOKEN>" > /root/.config/fleet-backup.env; chmod 600 /root/.config/fleet-backup.env'
+# systemd-Units installieren (liegen im Repo):
+sudo cp /home/decebu/docker-stacks/stacks/fleet-manager/backup/fleet-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fleet-backup.timer
+# Test:
+sudo /home/decebu/.local/bin/fleet-backup && systemctl list-timers fleet-backup.timer
+```
+
+---
+
+## Manager-Self-Backup (restic + systemd)
+
+Der Manager sichert **sich selbst** — bewusst **anders** als die Fleet-Clients:
+- **Clients:** von Kestra orchestriert (Flow `restic_backup_fleet` + Ansible).
+- **Manager:** host-lokaler **systemd-Timer** (`fleet-backup.timer`), kein Kestra — denn der
+  Kestra-Container sieht weder `~/.config/age` noch `/root/.restic_pw`.
+
+| Aspekt | Wert |
+|---|---|
+| Script | `~/.local/bin/fleet-backup` (chezmoi) — enthält Pfade/Retention; liest `/root/.restic_pw` + `/root/.config/fleet-backup.env` |
+| Sichert | `stacks/fleet-manager/` (Kestra-DB, wg-Keys, rsyncd.secrets) + `~/.config/age` + `~/.config/fleet` |
+| Exclude | `/var/backup` (Rekursion) |
+| Repo | `/var/backup/fleet_backups/fleet-mgr/` → wird vom QNAP-rsync mitgezogen |
+| Retention | `--keep-daily 7 --keep-weekly 4 --prune` |
+| Schedule | `fleet-backup.timer`, täglich **01:30** (`Persistent=true`) |
+| ntfy | meldet an `fleet_backups`, wenn `/root/.config/fleet-backup.env` einen Token hat (sonst nur Log) |
+| Units | versioniert in `stacks/fleet-manager/backup/` |
+
+Manuell / Status:
+```bash
+sudo /home/decebu/.local/bin/fleet-backup        # manueller Lauf
+systemctl list-timers fleet-backup.timer         # nächster Lauf
+journalctl -u fleet-backup                       # Logs
+```
+
+> **Caveat H2-DB:** `database.mv.db` wird im laufenden Betrieb kopiert (MVStore i.d.R.
+> konsistent genug). Für einen 100%-konsistenten Stand vor dem Backup Kestra kurz stoppen.
+
+> **Wichtig:** `/root/.restic_pw` ist der einzige Schlüssel zum Manager-Repo und liegt
+> **nicht** im Backup — extern sichern (Passwortmanager).
+
+Einrichtung/Neuinstallation: siehe Neuinstallation **Schritt 9**.
+
 ---
 
 ## Restore aus Backup (restic)
