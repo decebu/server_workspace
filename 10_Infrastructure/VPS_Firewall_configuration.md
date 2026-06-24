@@ -2,9 +2,10 @@
 
 ## 1. Grundprinzipien Firewall-Regeln & Routing
 
-- **Heimnetz 1** hat Zugriff auf alle anderen Heimnetze.  
-- **Heimnetz 2, 3 und 4** haben keinen direkten Zugriff aufeinander, sondern nur auf Heimnetz 1.  
-- **Mobile Clients** (Firezone) haben Zugriff auf Heimnetz 1, aber nicht auf Heimnetz 2, 3 oder 4.  
+- **Heimnetz 1** hat Zugriff auf alle anderen Netze.
+- **Norden** (192.168.20.0/24) hat keinen direkten Zugriff auf andere Remote-Netze, nur auf Heimnetz 1.
+- **Callitectum** (192.168.25.0/24) ist ein reines Einrichtungsnetz: Heimnetz 1 kann hinein, Callitectum kann nicht ins Heimnetz. Kein eigener RPi, kein Fleet Management.
+- **Mobile Clients** (Firezone) haben Zugriff auf Heimnetz 1, aber nicht auf Remote-Netze.
 - Falls doppelte Subnetze vorkommen, werden sie per NAT auf dem VPS umgeschrieben.
 
 👉 **AllowedIPs** sind bewusst breiter (ganze Subnetze) definiert, um Änderungen an den `.conf`-Dateien zu vermeiden.  
@@ -111,7 +112,7 @@ Die Feineinstellung erfolgt **immer über die UDM Pro Firewall**.
 ## 3. Schritt-für-Schritt Firewall-Konfiguration VPS (nftables)
 
 ### 3.1 Zielsetzung
-- Verkehr **aus HN2** (Interface `hn2`) darf nur zu:  
+- Verkehr **aus Norden** (Interface `hn2`) darf nur zu:  
   - `192.168.10.1` (UDM Pro)  
   - `192.168.30.2` (NAS)  
   - `192.168.50.12` (Home Assistant)  
@@ -120,6 +121,9 @@ Die Feineinstellung erfolgt **immer über die UDM Pro Firewall**.
   - `192.168.10.1` (UDM Pro)  
   - `192.168.30.2` (NAS)  
   - `192.168.50.12` (Home Assistant)
+- Verkehr **aus Heimnetz 1** (Interface `unifi`) nach Callitectum:
+  - `192.168.25.0/24` (komplettes Callitectum-Subnetz) → erlaubt
+- Verkehr **aus Callitectum** (Interface `callitectum`) ins Heimnetz: **blockiert** (keine Regel → policy drop greift)
 
 ### 3.2 Konfiguration
 
@@ -142,10 +146,11 @@ table inet filter {
     iif lo accept
     ct state established,related accept
 
-    # WireGuard-UDP-Ports (UDM/HN1, HN2, Firezone)
+    # WireGuard-UDP-Ports (UDM/HN1, Norden, Firezone)
+    # Callitectum: kein Port nötig, VPS ist Client und initiiert ausgehend
     udp dport { 55120, 51822, 55121 } accept
 
-    # SSH nur im Tunnel (HN2)
+    # SSH nur im Tunnel (Norden)
     iif "hn2" tcp dport 22 accept
 
     # (Optional) Firezone HTTPS
@@ -159,11 +164,14 @@ table inet filter {
     # Etablierte Sessions
     ct state established,related accept
 
-    # HN2 → erlaubte Ziele
+    # Norden → erlaubte Ziele
     iif "hn2" ip daddr { 192.168.10.1, 192.168.30.2, 192.168.50.12, 10.10.20.1 } accept
 
     # Firezone → erlaubte Ziele
     iif "firezone" ip daddr { 192.168.10.1, 192.168.30.2, 192.168.50.12 } accept
+
+    # Heimnetz 1 → Callitectum (einseitig, kein Gegenweg)
+    iif "unifi" oif "callitectum" ip daddr 192.168.25.0/24 accept
   }
 }
 ```
@@ -225,6 +233,13 @@ sudo nft list ruleset
 ```
 - Sicherstellen, dass `policy drop` aktiv ist.  
 - Erlaubte Ziele erscheinen als Whitelist-Einträge.
+
+### Callitectum-Tunnel prüfen
+```bash
+sudo wg show callitectum
+ping 192.168.25.1     # FRITZ!Box Callitectum Gateway
+```
+- Gegenrichtung (von Callitectum ins Heimnetz) muss geblockt sein.
 
 ---
 
