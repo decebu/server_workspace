@@ -1,17 +1,17 @@
 # Willkommen bei Jansen Server Anleitungen
-Nähere Informationen zu den einzelnen Punkten auf
+Nähere Informationen zu den einzelnen Punkten auf:
 
-https://web.andrejansen.de
+`<PUBLIC_ENDPOINT>`
 
-Eine kleine Übersicht meiner gehosteten Webseiten findet man hier
+Eine kleine Übersicht meiner gehosteten Webseiten findet man hier:
 
-https://homepage.jansen-server.de/
+`<PUBLIC_ENDPOINT>`
 
 Viele der Server sind nicht offen, es wird ein eigener Authelia Authentifizierungsserve mit 2FA gehostet. Wenn man hierzu das Passwort hat, kann man automatisch alle Webseiten anschauen.
 
 Es gibt hier Anleitungen und Hilfen sowie Tipps zu den einzelnen Punkten. Diese sind nicht immer vollständig und dienen mir der Unterstützung bei der Fehlersuche oder Neuinstallation von Server & Software. Oftmals werden anderweitige Kenntnisse vorausgesetzt, um die Hilfen aber übersichtlich zu gestalten beschränke ich mich aufs wesentliche oder verweise auf andere Seiten.
 
-### Da sich meine Server Struktur schneller ändert als ich den Aufbau der Anleitungen erstellen kann, sind viele Punkte offen, bei Fragen zu offenen "Themen" schreibt mich einfach an "info@andrejansen.de"
+### Da sich meine Server Struktur schneller ändert als ich den Aufbau der Anleitungen erstellen kann, sind viele Punkte offen.
 
 # Hauptmenü
 
@@ -23,5 +23,11 @@ Es gibt hier Anleitungen und Hilfen sowie Tipps zu den einzelnen Punkten. Diese 
 
 ## 3 Server
 [3_Server Link](/3_Server/README.md)
+
+## 5 Dokumentenmanagement
+[5_Dokumentenmanagement Link](/5_Dokumentenmanagement/README.md)
+
+## 40 Backup-Strategie
+[40_BackupStrategy Link](/40_BackupStrategy/README.md)
 
 
