@@ -24,10 +24,13 @@ Es gibt hier Anleitungen und Hilfen sowie Tipps zu den einzelnen Punkten. Diese 
 ## 3 Server
 [3_Server Link](/3_Server/README.md)
 
-## 5 Dokumentenmanagement
-[5_Dokumentenmanagement Link](/5_Dokumentenmanagement/README.md)
+## 20 Server
+[20_Server Link](/20_Server/homelab-cluster.md)
 
 ## 40 Backup-Strategie
 [40_BackupStrategy Link](/40_BackupStrategy/README.md)
+
+## 50 Dokumentenmanagement
+[50_Dokumentenmanagement Link](/50_Dokumentenmanagement/README.md)
 
 

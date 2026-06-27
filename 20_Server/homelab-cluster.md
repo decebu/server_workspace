@@ -1,5 +1,129 @@
-# Energiesparendes Home-Lab – Raspberry Pi 5 Cluster  
-## Phase 1 – Node 1 Basis-Setup & NVMe-Boot
+# Nexus Homelab-Server und Cluster-Strategie
+
+Dieses Dokument beschreibt Nexus als aktuellen Homelab-Server und ordnet ihn in das spaetere Zielbild eines redundanten Homelab-Server-Clusters ein.
+
+## Grundsatz
+
+Nexus ist aktuell kein Cluster, sondern ein einzelner operativer Server.
+
+- Ist-Zustand: `nexusNG`, Raspberry Pi 5, Debian 13, Docker Compose
+- Zielbild: Homelab-Server-Cluster mit N+1-Redundanz
+- Dokumentationsprinzip: Strategie und aktuelle operative Vereinfachung werden gemeinsam beschrieben, aber klar getrennt
+- Fleet-Abgrenzung: Nexus ist nicht Teil der Fleet
+
+`wg0` auf Nexus wird als Altlast oder Relikt behandelt. Das Interface ist kein Zeichen fuer Fleet-Zugehoerigkeit und nicht Grundlage fuer Backup, Management oder Zielarchitektur.
+
+## Strategische Zielarchitektur
+
+Langfristig soll das Homelab auf einem Server-Cluster mit N+1-Redundanz laufen.
+
+Ziele:
+- Ausfall eines Knotens darf zentrale Dienste nicht vollstaendig lahmlegen
+- Dienste sollen reproduzierbar aus Dokumentation, Compose-Dateien und Backups wiederherstellbar sein
+- Storage, Backup und Restore muessen vor produktiven kritischen Diensten geklaert sein
+- Lokale Dienste bleiben im Heimnetz; keine Dokumente oder Secrets verlassen ungeplant das Heimnetz
+
+Geplante Dienste im Zielbild:
+
+| Dienstbereich | Ziel |
+|---|---|
+| Reverse Proxy | Cluster-faehige Traefik- oder vergleichbare Loesung |
+| DNS | Redundanter lokaler DNS-Resolver |
+| IAM | Authentik oder Nachfolgeloesung mit gesicherter Datenbank |
+| Dokumentenmanagement | paperless-ngx mit gesicherter Datenbank und Dokumentablage |
+| Monitoring | Zentrale Ueberwachung von Diensten, Backups und Hostzustand |
+| Backup | Restic-basierte Backups mit dokumentiertem Restore-Test |
+
+## Aktuelle operative Umsetzung
+
+Der aktuelle produktive Stand ist bewusst einfacher:
+
+| Eigenschaft | Wert |
+|---|---|
+| Hostname | `nexusNG` |
+| Rolle | Primaerer Homelab-Server als Einzelknoten |
+| Hardware | Raspberry Pi 5 Model B, 8 GB RAM |
+| Betriebssystem | Debian GNU/Linux 13, arm64 |
+| Bootmedium | NVMe, Root-Dateisystem auf ext4 |
+| Netzwerk | `eth0` im Server-/Infra-Netz, aktuell `192.168.70.3/24` |
+| Containerbetrieb | Docker Engine und Docker Compose |
+| Stack-Pfad | `/home/decebu/docker-stacks/` |
+| Portainer | Nicht laufend |
+
+Die operative Umsetzung ist eine temporaere Vereinfachung, bis das N+1-Zielbild aufgebaut ist. Sie ist trotzdem produktionsrelevant, weil zentrale Dienste bereits auf Nexus laufen.
+
+## Laufende Dienste
+
+Der operative Dienstekatalog wird separat gefuehrt: `nexus-dienste.md`.
+
+| Dienst | Betrieb | Zweck | Backup-Relevanz |
+|---|---|---|---|
+| Traefik | Docker | Reverse Proxy und TLS-Terminierung | Mittel bis hoch |
+| Authentik | Docker | Identity Provider / IAM | Hoch |
+| PostgreSQL fuer Authentik | Docker Volume | Datenbank fuer Authentik | Hoch |
+| Unbound | Docker | Lokaler DNS-Resolver | Mittel |
+| WireGuard `wg0` | System | Altlast / Relikt, nicht Fleet-Zugehoerigkeit | Hoch fuer Keys, aber strategisch offen |
+| nginx-demo | Docker | Test-/Demo-Dienst | Keine |
+| Docker Engine | System | Container-Laufzeit | Mittel |
+
+Definierte, aber nicht laufende Stacks duerfen nicht als produktive Dienste behandelt werden. Dazu gehoeren unter anderem Platzhalter- oder Test-Stapel fuer Portainer, Monitoring, MQTT, Firezone, Fleet-Komponenten und weitere Experimente.
+
+## Netzwerk und DNS
+
+Nexus steht im Server-/Infra-Netz. Die aktuelle Adresse `192.168.70.3` ist per DHCP vergeben und muss fuer produktiven Betrieb als feste DHCP-Reservierung oder statische Adresse abgesichert werden.
+
+Aktueller DNS-Stand:
+- Nexus nutzt sich selbst als DNS-Resolver.
+- Unbound laeuft lokal auf Nexus und bindet Port 53.
+- Aeltere Hinweise auf Unbound auf QNAP sind historisch und nicht mehr der aktuelle Nexus-Betriebsstand.
+
+Offene sicherheitsrelevante Punkte:
+- Kein expliziter Host-Firewall-Regelsatz fuer Nicht-Docker-Dienste dokumentiert
+- `rpcbind` lauscht auf Port 111 und ist ohne belegten Bedarf ein Risiko
+- Desktop-nahe Dienste wie `lightdm`, `cups`, `avahi-daemon`, `bluetooth` und `cloud-init` muessen geprueft werden
+
+## Backup-Einordnung
+
+Nexus hat seit 2026-06-27 ein erstes Restic-Backup auf QNAP. Es sichert `docker-stacks`, Staging-Daten, Authentik-Dumps und Manifeste. Ein einfacher Restore-Test fuer `docker-stacks` und Manifest war erfolgreich.
+
+Fuer Nexus gilt:
+- Backup gehoert zur LAN-Server-Strategie, nicht zur Fleet-Strategie
+- Nexus ist kein Fleet-Client
+- Backup-Standard ist Restic von Nexus auf ein QNAP-Ziel
+- Restore-Test ist Pflichtbestandteil der Strategie
+- Monitoring und dienstspezifische Restore-Tests sind noch offen
+
+Details stehen in `../40_BackupStrategy/lan-server-nexus.md`.
+Die dienstspezifische Backup-Matrix steht in `nexus-dienste.md`.
+
+## Relevanz fuer paperless-ngx
+
+Nexus ist technisch als vorlaeufiger Host fuer paperless-ngx geeignet:
+- ausreichend freier NVMe-Speicher
+- ausreichend RAM fuer paperless-ngx, PostgreSQL, Redis und optionale Extraktionsdienste
+- Docker Compose als vorhandener Betriebsstandard
+- Traefik als vorhandener Reverse Proxy
+
+Produktivbetrieb mit echten Dokumenten ist aber weiter gesperrt, bis ein paperless-spezifischer Backup- und Restore-Test dokumentiert ist. paperless-ngx erzeugt hochkritische Daten: Dokumente, Datenbank, Metadaten, Import- und Exportbereiche.
+
+## Offene Punkte
+
+> **Offen:** Monitoring fuer Nexus-Backup einrichten und Authentik-/Traefik-Restore-Tests dokumentieren.
+
+> **Offen:** Feste DHCP-Reservierung oder statische Adresse fuer Nexus im Server-/Infra-Netz absichern.
+
+> **Offen:** Host-Hardening pruefen, insbesondere `rpcbind`, Desktop-Dienste, `cloud-init`, SSH und Host-Firewall.
+
+> **Offen:** Klaeren, ob `wg0` entfernt, deaktiviert oder dokumentiert stillgelegt wird.
+
+> **Offen:** Zielarchitektur fuer N+1-Cluster konkretisieren, sobald weitere Hardware reproduzierbar bereitsteht.
+
+## Historische Entwicklung: Raspberry Pi 5 Cluster / `pve-node1`
+
+Die folgenden Abschnitte beschreiben die fruehere Aufbauphase. Sie erklaeren die Entstehung des Hosts und technische Vorarbeit, sind aber nicht mehr die aktuelle operative Wahrheit von Nexus.
+
+### Energiesparendes Home-Lab - Raspberry Pi 5 Cluster
+#### Phase 1 - Node 1 Basis-Setup & NVMe-Boot
 
 Stand: Phase 1 (Node 1), NVMe-Boot aktiv, WLAN noch an.
 
@@ -58,11 +182,11 @@ Ziel dieser Phase:
 
 ### 3.3 Geplantes IP-/FQDN-Schema (Cluster-relevant)
 
-- Lokale DNS-Zone: `home.decebu.com`
+- Lokale DNS-Zone: `<LOCAL_DNS_ZONE>`
 - Geplante FQDNs:
-  - `pve-node1.home.decebu.com` → **192.168.70.11**
-  - `pve-node2.home.decebu.com` → 192.168.70.12
-  - `pve-node3.home.decebu.com` → 192.168.70.13
+  - `pve-node1.<LOCAL_DNS_ZONE>` → **192.168.70.11**
+  - `pve-node2.<LOCAL_DNS_ZONE>` → 192.168.70.12
+  - `pve-node3.<LOCAL_DNS_ZONE>` → 192.168.70.13
 - Aktueller Stand Node 1 (Phase 1):
   - Läuft via DHCP im VLAN 70 (z. B. `192.168.70.187`)
   - Statische IP wird in **Phase 2** gesetzt.
@@ -76,7 +200,7 @@ Ziel dieser Phase:
   - DNS-Server-IP im VLAN 70: `192.168.70.6`.
 
 - Beobachtetes Problem:
-  - Clients in VLAN 30 (Familiennetz) → `192.168.70.6` als DNS → **funktioniert** (google.com o. ä. wird aufgelöst).
+  - Clients in VLAN 30 (Familiennetz) → `192.168.70.6` als DNS → **funktioniert** (externe Domains werden aufgelöst).
   - Raspberry Pi 5 in VLAN 70 → `192.168.70.6` als DNS → **kann externe Domains NICHT auflösen**.
   - Ursache: Kombination aus **Docker-Netzwerkmodus** (vermutlich `bridge`) und VLAN-/Routing-Regeln → Container nicht direkt im VLAN 70 sichtbar / erreichbar.
 

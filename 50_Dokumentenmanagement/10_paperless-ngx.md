@@ -5,6 +5,19 @@
 
 Die Migration ersetzt ecoDMS schrittweise. Ab dem Schnittdatum `2020-01-01` wird der Bestand vollständig klassifiziert. Ältere Dokumente werden zunächst als suchbarer Altbestand übernommen.
 
+## Betriebsfreigabe
+Produktivbetrieb mit echten Dokumenten ist erst freigegeben, wenn ein paperless-spezifischer Backup- und Restore-Test dokumentiert ist. Das allgemeine Nexus-Backup ist eingerichtet, deckt paperless-ngx aber erst nach Installation und expliziter Aufnahme der paperless-Pfade ab.
+
+Für paperless-ngx müssen mindestens gesichert werden:
+- Compose-Dateien und Konfiguration
+- eigene PostgreSQL-Datenbank
+- Redis-Konfiguration
+- Media-Verzeichnis
+- Consume-Verzeichnis
+- Export-Verzeichnis
+
+paperless-ngx bekommt eine eigene PostgreSQL-Instanz und einen eigenen Redis-Dienst. Die vorhandene Authentik-Datenbank wird nicht mitbenutzt.
+
 ## Klassifizierungsschema
 
 ### Korrespondenten
@@ -111,5 +124,5 @@ PAPERLESS_TIME_ZONE: Europe/Berlin
 ```
 
 ## Offene Punkte
-- **Offen:** Detailliertes Backup-Konzept für paperless-ngx in `40_BackupStrategy/` verlinken.
+- **Offen:** Backup-Konzept und Restore-Test fuer paperless-ngx vor Produktivstart abschliessen.
 - **Offen:** Prüfung, welche Daten in paperless-ngx als Meta-Felder noch zusätzlich gespeichert werden sollten.

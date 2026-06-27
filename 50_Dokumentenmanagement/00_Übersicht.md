@@ -42,6 +42,18 @@ Zusätzlich wird eine lokale LLM-Pipeline auf einem Mac Mini M4 Pro vorgesehen, 
 - Cloud-APIs sind für die Dokumentenextraktion nicht vorgesehen.
 - Falls später externe Dienste genutzt werden, dürfen nur abstrahierte Obsidian-Notizen ohne Vertragsnummern, sensible Personendaten oder Originaldokumente weitergegeben werden.
 
+## Produktiv-Gate
+paperless-ngx darf erst produktiv mit echten Dokumenten starten, wenn ein paperless-spezifischer Backup- und Restore-Test dokumentiert ist. Das allgemeine Nexus-Backup ist eingerichtet, ersetzt aber keinen paperless-Restore-Test.
+
+Mindestumfang:
+- Compose-Dateien und Konfiguration
+- PostgreSQL-Datenbank
+- Redis-Konfiguration
+- Media-Verzeichnis
+- Consume-Verzeichnis
+- Export-Verzeichnis
+- Restore-Test mit einem kleinen paperless-Testdatensatz
+
 ## Phasen
 
 ### Phase 1: Basisaufbau
@@ -82,6 +94,6 @@ Phase 2 - Nach Mac Mini Anschaffung
 - Obsidian Sync und mobiler Zugriff bleiben offen.
 
 ## Offene Punkte
-- **Offen:** Backup-Strategie für paperless-ngx – wird im Homelab-Konzept behandelt.
+- **Offen:** Backup-Strategie und Restore-Test fuer paperless-ngx muessen vor Produktivstart abgeschlossen sein.
 - **Offen:** Mac Mini M4 Pro Netzwerkeinbindung – folgt nach Anschaffung.
 - **Offen:** Obsidian Sync / mobiler Zugriff.

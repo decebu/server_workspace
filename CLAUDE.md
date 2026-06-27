@@ -9,7 +9,8 @@ Es gibt **keinen lauffaehigen Code** in diesem Repo.
 ## Repo-Struktur
 
 ### Aktive Inhalte (meine eigenen)
-- `5_Dokumentenmanagement/` - Dokumentenmanagement, paperless-ngx, Obsidian, lokale LLM-Pipeline
+- `20_Server/` - Nexus Homelab-Server, operative Umsetzung und Cluster-Zielbild
+- `50_Dokumentenmanagement/` - Dokumentenmanagement, paperless-ngx, Obsidian, lokale LLM-Pipeline
 - `10_Infrastructure/` - Netzwerk, VPN, DNS, Firewall, Raspberry Pi Edge Router
 - `40_BackupStrategy/` - Backup-Strategie mit resticprofile, QNAP, Windows-Clients
 
