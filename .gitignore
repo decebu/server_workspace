@@ -7,6 +7,10 @@ logs
 __pycache__
 *.pyc
 
+# LLM-Kontext: lokale De-Anonymisierungs-Legende niemals einchecken
+60_LLM_Context/_legend.local.md
+*_legend.local.md
+
 # Other
 *.uuid
 *.conf
