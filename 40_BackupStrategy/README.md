@@ -15,7 +15,7 @@ Die Backup-Dokumentation unterscheidet bewusst zwischen mehreren Bereichen.
 | Bereich | Status | Ziel |
 |---|---|---|
 | Fleet Management | Vorhandene Strategie | Automatisierte Backups und Pull-Aggregation für Fleet-Hosts |
-| LAN-Server | Nexus Basis eingerichtet | Nexus und spätere LAN-Server mit Restic auf QNAP sichern |
+| LAN-Server | Nexus Basis mit ntfy eingerichtet | Nexus und spätere LAN-Server mit Restic auf QNAP sichern |
 | Windows-Clients | Vorhandene Basis | Restic/resticprofile für einzelne Clients |
 | paperless-ngx | Gesperrt bis Backup steht | Dokumente, Datenbank und Konfiguration vor Produktivstart sichern |
 
@@ -24,10 +24,11 @@ Die Backup-Dokumentation unterscheidet bewusst zwischen mehreren Bereichen.
 Für Nexus und spätere LAN-Server gilt als Standard:
 - Restic-Backup vom Server auf ein QNAP-Backupziel
 - Restic-Passwort host-lokal, root-only, nicht im Git
+- ntfy-Benachrichtigung fuer erfolgreiche und fehlgeschlagene Backup-Laeufe
 - Include-/Exclude-Pfade dokumentieren
 - Retention und Zeitplan dokumentieren
 - Restore-Test dokumentieren
-- Monitoring oder Statusmeldung vor produktiven kritischen Diensten klären
+- Monitoring oder Statusmeldung vor produktiven kritischen Diensten klaeren
 
 Nexus ist nicht Teil der Fleet. Die vorhandene Fleet-Backup-Strategie wird nicht als stillschweigende Grundlage für Nexus verwendet.
 
@@ -36,7 +37,8 @@ Aktueller Nexus-Stand:
 - systemd Timer eingerichtet
 - Authentik-Dump und Manifest werden erstellt
 - einfacher Restore-Test fuer `docker-stacks` und Manifest erfolgreich
-- Monitoring und dienstspezifische Restore-Tests sind noch offen
+- ntfy-Benachrichtigung fuer Erfolg und Fehler erfolgreich getestet
+- dienstspezifische Restore-Tests sind noch offen
 
 ## Verbindung zur DMS-Strategie
 `paperless-ngx` darf produktiv erst starten, wenn die Backup- und Restore-Anforderungen für Nexus und paperless-ngx dokumentiert sind.
@@ -46,4 +48,4 @@ Siehe hierzu auch:
 - `../20_Server/nexus-dienste.md`
 - `../50_Dokumentenmanagement/40_Backup-Verweis.md`
 
-> **Offen:** Monitoring sowie Authentik-, Traefik- und paperless-spezifische Restore-Tests ergaenzen.
+> **Offen:** Authentik-, Traefik- und paperless-spezifische Restore-Tests ergaenzen.

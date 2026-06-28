@@ -122,7 +122,7 @@ Dieses Dokument beschreibt die aktuell bekannten Dienste auf Nexus (`nexusNG`). 
 
 ## Aktueller Backup-Stand
 
-Stand: 2026-06-27
+Stand: 2026-06-28
 
 - Nexus-Backup per Restic auf QNAP ist eingerichtet.
 - `nexus-backup.timer` laeuft taeglich gegen 02:30 Uhr.
@@ -130,6 +130,7 @@ Stand: 2026-06-27
 - Manifest wird vor dem Backup erzeugt.
 - Restore-Test fuer `docker-stacks` und Manifest war erfolgreich.
 - Der Restore-Test liegt temporaer unter `/tmp/nexus-restore-test`.
+- ntfy-Benachrichtigung fuer Backup-Erfolg und Backup-Fehler ist eingerichtet und getestet.
 
 ## Offene Punkte
 
@@ -144,3 +145,5 @@ Stand: 2026-06-27
 > **Offen:** Automatische Container-Updates klaeren: Watchtower gewuenscht oder bewusst deaktiviert?
 
 > **Offen:** Sicherheitsupdates klaeren, da automatische Update-Timer auffaellig waren.
+
+> **Offen:** Script-Cleanup fuer `nexus-backup` durchfuehren und alte Backup-Datei entfernen, sobald die neue Version stabil ist.

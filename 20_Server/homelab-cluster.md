@@ -84,14 +84,15 @@ Offene sicherheitsrelevante Punkte:
 
 ## Backup-Einordnung
 
-Nexus hat seit 2026-06-27 ein erstes Restic-Backup auf QNAP. Es sichert `docker-stacks`, Staging-Daten, Authentik-Dumps und Manifeste. Ein einfacher Restore-Test fuer `docker-stacks` und Manifest war erfolgreich.
+Nexus hat seit 2026-06-27 ein erstes Restic-Backup auf QNAP. Es sichert `docker-stacks`, Staging-Daten, Authentik-Dumps und Manifeste. Ein einfacher Restore-Test fuer `docker-stacks` und Manifest war erfolgreich. Seit 2026-06-28 sendet der Backup-Job ntfy-Meldungen fuer erfolgreiche und fehlgeschlagene Laeufe.
 
 Fuer Nexus gilt:
 - Backup gehoert zur LAN-Server-Strategie, nicht zur Fleet-Strategie
 - Nexus ist kein Fleet-Client
 - Backup-Standard ist Restic von Nexus auf ein QNAP-Ziel
 - Restore-Test ist Pflichtbestandteil der Strategie
-- Monitoring und dienstspezifische Restore-Tests sind noch offen
+- ntfy-Benachrichtigung ist eingerichtet
+- dienstspezifische Restore-Tests sind noch offen
 
 Details stehen in `../40_BackupStrategy/lan-server-nexus.md`.
 Die dienstspezifische Backup-Matrix steht in `nexus-dienste.md`.
@@ -108,7 +109,7 @@ Produktivbetrieb mit echten Dokumenten ist aber weiter gesperrt, bis ein paperle
 
 ## Offene Punkte
 
-> **Offen:** Monitoring fuer Nexus-Backup einrichten und Authentik-/Traefik-Restore-Tests dokumentieren.
+> **Offen:** Authentik-/Traefik-Restore-Tests dokumentieren.
 
 > **Offen:** Feste DHCP-Reservierung oder statische Adresse fuer Nexus im Server-/Infra-Netz absichern.
 

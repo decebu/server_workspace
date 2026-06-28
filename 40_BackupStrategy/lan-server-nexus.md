@@ -10,24 +10,26 @@ Nexus soll als einzelner Homelab-Server wiederherstellbar sein, bevor weitere pr
 
 ## Aktueller Umsetzungsstand
 
-Stand: 2026-06-27
+Stand: 2026-06-28
 
-Das erste Nexus-Backup ist eingerichtet und getestet.
+Das erste Nexus-Backup ist eingerichtet und getestet. Die ntfy-Benachrichtigung fuer Erfolg und Fehler ist ebenfalls eingerichtet.
 
 | Bereich | Status |
 |---|---|
 | Restic | installiert, Repository initialisiert |
 | QNAP-Ziel | per systemd Mount Unit eingebunden |
-| Backup-Script | `/usr/local/sbin/nexus-backup` |
+| Backup-Script | `/home/decebu/.local/bin/nexus-backup`, verwaltet ueber chezmoi |
 | systemd Timer | `nexus-backup.timer`, taeglich gegen 02:30 Uhr |
 | Authentik-Dump | erfolgreich in `/var/backups/nexus/authentik/` |
 | Manifest | erfolgreich in `/var/backups/nexus/manifest/` |
 | Restore-Test | erfolgreich nach `/tmp/nexus-restore-test` |
 | Snapshots | erster Snapshot erfolgreich erstellt |
+| ntfy-Benachrichtigung | Erfolg und Fehler erfolgreich getestet |
 
 Backup-Ziel:
 - Restic-Backup von Nexus auf ein QNAP-Backupziel
 - Restore-Test als Pflichtbestandteil
+- ntfy-Meldung fuer erfolgreiche und fehlgeschlagene Backup-Laeufe
 - Keine Secrets im Git
 - Keine Abhaengigkeit von `wg0` oder Fleet-Management
 
@@ -36,6 +38,12 @@ Aktuelles Repository:
 - Restic-Repository: `/mnt/backup-nexus/restic-repo`
 - Restic-Passwortdatei: `/root/.restic_pw`
 - SMB-Credentials: `/root/.config/nexus-backup/qnap-smb.credentials`
+
+Geplante Benachrichtigung:
+- ntfy-Endpunkt: `<NTFY_PUBLIC_ENDPOINT>`
+- ntfy-Topic: `homelab_backups`
+- ntfy-User: `homelab-bot`
+- ntfy-Token: dedizierter Token fuer `homelab-bot`, host-lokal root-only, nicht im Git
 
 ## Aktueller Schutzbedarf
 
@@ -59,14 +67,16 @@ Grundsaetze:
 - Restic-Repository je Server, z. B. `nexusNG`
 - Repository-Passwort in `/root/.restic_pw`, Rechte `600`
 - QNAP-Zugangsdaten nicht im Git
+- ntfy-Token in `/root/.config/nexus-backup/ntfy.env`, Rechte `600`
 - Backup-Job per systemd Timer
+- Jeder Lauf sendet eine ntfy-Meldung bei Erfolg oder Fehler
 - Retention: 7 taegliche, 4 woechentliche und 6 monatliche Snapshots als Startwert
 - Nach jedem Strukturwechsel Restore-Test durchfuehren
 
 ## Umsetzung
 
 Angelegte Komponenten:
-- `/usr/local/sbin/nexus-backup`
+- `/home/decebu/.local/bin/nexus-backup`
 - `/etc/systemd/system/nexus-backup.service`
 - `/etc/systemd/system/nexus-backup.timer`
 - `/etc/systemd/system/mnt-backup\x2dnexus.mount`
@@ -77,8 +87,36 @@ Angelegte Komponenten:
 Secret-Dateien:
 - `/root/.restic_pw`
 - `/root/.config/nexus-backup/qnap-smb.credentials`
+- `/root/.config/nexus-backup/ntfy.env`
 
 Diese Dateien sind host-lokal, root-only und duerfen nicht ins Git.
+
+## ntfy-Benachrichtigung
+
+Nexus soll wie die bestehenden Backup-Tasks eine Statusmeldung per ntfy senden. Die Benachrichtigung ist Teil des LAN-Server-Backup-Standards, nicht der Fleet-Strategie.
+
+Anforderungen:
+- Erfolgsmeldung nach abgeschlossenem Backup, Retention und Manifest-Erstellung
+- Fehlermeldung bei jedem abgebrochenen Lauf
+- Titel mit Hostname und Ergebnis
+- Nachricht mit Zeitpunkt, betroffenem Dienst und Hinweis auf `journalctl -u nexus-backup.service`
+- Tags oder Prioritaet nach Ergebnis
+- Kein Secret, Token, Passwort, Snapshot-Hash oder Repository-ID in der Push-Nachricht
+
+Secret-Verwaltung:
+- Endpunkt, Topic und Token werden aus `/root/.config/nexus-backup/ntfy.env` gelesen
+- Der Token gehoert zum separaten ntfy-User `homelab-bot`
+- Datei ist root-only und nicht im Git
+- Falls die Datei fehlt, darf das Backup nicht scheitern; es wird nur lokal geloggt, dass keine ntfy-Meldung gesendet wurde
+
+Beispiel fuer die Struktur ohne echte Secrets:
+
+```bash
+NTFY_ENDPOINT="<NTFY_PUBLIC_ENDPOINT>"
+NTFY_TOPIC="homelab_backups"
+NTFY_TOKEN="<API_TOKEN>"
+NTFY_USER="homelab-bot"
+```
 
 ## Include- und Exclude-Regeln
 
@@ -129,6 +167,6 @@ Ein technischer Testbetrieb ohne echte Dokumente kann separat geplant werden, gi
 
 > **Offen:** Klaeren, ob `/etc/wireguard/` weiterhin benoetigt und in das Backup aufgenommen werden soll.
 
-> **Offen:** Monitoring oder Benachrichtigung fuer fehlgeschlagene Nexus-Backups einrichten.
+> **Offen:** Script-Cleanup fuer `nexus-backup` durchfuehren und alte Backup-Datei entfernen, sobald die neue Version stabil ist.
 
 > **Offen:** Paperless-spezifischen Restore-Test vor Produktivstart durchfuehren.
